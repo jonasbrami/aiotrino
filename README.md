@@ -6,6 +6,9 @@
 
 This package provides a asyncio client interface to query [Trino](https://trino.io/)
 a distributed SQL engine. It supports Python 3.9, 3.10, 3.11, 3.12, 3.13.
+
+**Note**: This fork is designed to prototype Arrow spooling functionality in conjunction with the Trino server fork at [https://github.com/jonasbrami/trino](https://github.com/jonasbrami/trino), which implements server-side Arrow spooling support.
+
 # Installation
 
 ```
@@ -58,6 +61,73 @@ For backwards compatibility with PrestoSQL, override the headers at the start of
 import aiotrino
 aiotrino.constants.HEADERS = aiotrino.constants.PrestoHeaders
 ```
+
+## Arrow Interface for High-Performance Data Fetching
+
+The arrow interface provides efficient columnar data transfer for large datasets. This feature works in conjunction with the Arrow spooling prototype implemented in the [Trino server fork](https://github.com/jonasbrami/trino).
+
+### Fetch All Results
+
+```python
+import aiotrino
+import asyncio
+
+async def fetch_large_query_result():
+    query = """
+    SELECT * FROM your_catalog.your_schema.your_table 
+    LIMIT 1000000
+    """
+    
+    async with aiotrino.dbapi.connect(
+        host="your-trino-host",
+        port=8080,
+        user='your-username',
+        encoding='arrow'  # Enable Arrow encoding for better performance
+    ) as conn:
+        cursor = await conn.cursor()
+        async with cursor as cur:
+            await cur.execute(query)
+            # Fetch all results as Arrow table
+            arrow_table = await cur.fetchall_arrow()
+            print(f"Fetched {len(arrow_table)} rows")
+            return arrow_table
+
+# Run the async function
+arrow_table = asyncio.run(fetch_large_query_result())
+```
+
+### Fetch Single Result
+
+```python
+import aiotrino
+import asyncio
+
+async def fetch_single_result():
+    query = "SELECT COUNT(*) as total_rows FROM your_catalog.your_schema.your_table"
+    
+    async with aiotrino.dbapi.connect(
+        host="your-trino-host",
+        port=8080,
+        user='your-username',
+        encoding='arrow'
+    ) as conn:
+        cursor = await conn.cursor()
+        async with cursor as cur:
+            await cur.execute(query)
+            # Fetch single result as Arrow table
+            arrow_table = await cur.fetchone_arrow()
+            return arrow_table
+
+result = asyncio.run(fetch_single_result())
+```
+
+### Features
+
+- **Arrow Encoding**: High-performance columnar data format support
+- **Flexible Fetching**: Use `fetchall_arrow()` for large datasets or `fetchone_arrow()` for single results
+- **Async/Await**: Fully asynchronous API
+- **Multiple Encodings**: Support for 'arrow', 'json+zstd', and other formats
+- **Easy Integration**: Works seamlessly with Polars, Pandas, and other data libraries
 
 # Basic Authentication
 The `BasicAuthentication` class can be used to connect to a LDAP-configured Trino
