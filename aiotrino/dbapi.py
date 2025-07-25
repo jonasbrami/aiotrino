@@ -800,10 +800,10 @@ class SegmentCursor(Cursor):
         Fetch the result of the query as an Apache Arrow Table.
         """ 
         semaphore = Semaphore(constants.MAX_PARALLEL_SEGMENT_RETRIEVAL)  # Limit concurrent downloads to s3
-        s3_tasks = []
+        arrow_segment_tasks = []
         while segment := await self.fetchone():
-            s3_tasks.append(asyncio.create_task(self._fetch_and_read_arrow_segment(segment, semaphore)))
-        segment_arrow_tables = await asyncio.gather(*s3_tasks)
+            arrow_segment_tasks.append(asyncio.create_task(self._fetch_and_read_arrow_segment(segment, semaphore)))
+        segment_arrow_tables = await asyncio.gather(*arrow_segment_tasks)
         # Concatenate all sub-tables into a single table
         
         return pa.concat_tables(segment_arrow_tables)
