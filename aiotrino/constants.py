@@ -11,6 +11,7 @@
 # limitations under the License.
 
 from typing import Any, Optional
+import os 
 
 DEFAULT_PORT = 8080
 DEFAULT_TLS_PORT = 443
@@ -66,3 +67,5 @@ HEADER_RESET_AUTHORIZATION_USER = "X-Trino-Reset-Authorization-User"
 LENGTH_TYPES = ["char", "varchar"]
 PRECISION_TYPES = ["time", "time with time zone", "timestamp", "timestamp with time zone", "decimal"]
 SCALE_TYPES = ["decimal"]
+
+MAX_PARALLEL_SEGMENT_RETRIEVAL = int(os.environ.get("TRINO_MAX_PARALLEL_SEGMENT_RETRIEVAL", 100))

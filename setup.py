@@ -90,6 +90,7 @@ setup(
         "tzdata",
         "tzlocal",
         "zstandard",
+        "pyarrow"
     ],
     extras_require={
         "all": all_require,

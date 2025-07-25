@@ -51,6 +51,11 @@ from aiotrino.exceptions import (
 )
 from aiotrino.transaction import NO_TRANSACTION, IsolationLevel, Transaction
 from aiotrino.utils import aiter, anext
+import pyarrow as pa
+import pyarrow.ipc as ipc
+import asyncio
+from asyncio import Semaphore
+from contextlib import nullcontext
 
 __all__ = [
     # https://www.python.org/dev/peps/pep-0249/#globals
@@ -171,6 +176,7 @@ class Connection(object):
                 "json+zstd",
                 "json+lz4",
                 "json",
+                "arrow"
             ]
 
         self.host = host if parsed_host.hostname is None else parsed_host.hostname + parsed_host.path
@@ -287,6 +293,9 @@ class Connection(object):
             request = self.transaction.request
         else:
             request = self._create_request()
+
+        if "arrow" in self._client_session.encoding:
+            cursor_style = "segment"
 
         cursor_class = {
             # Add any custom Cursor classes here
@@ -732,6 +741,17 @@ class Cursor(object):
     async def close(self):
         await self.cancel()
         await self._request.close()
+    
+    async def fetchall_arrow(self) -> pa.Table:
+        raise NotImplementedError(
+            "fetch_all_arrow is not implemented for this cursor type. "
+            "Use SegmentCursor for fetching results as Apache Arrow Table."
+        )
+    async def fetchone_arrow(self) -> Optional[pa.Table]:
+        raise NotImplementedError(
+            "fetch_one_arrow is not implemented for this cursor type. "
+            "Use SegmentCursor for fetching results as Apache Arrow Table."
+        )
 
 
 class SegmentCursor(Cursor):
@@ -753,7 +773,41 @@ class SegmentCursor(Cursor):
         )
         self._iterator = aiter(await self._query.execute())
         return self
+    
+    async def _fetch_and_read_arrow_segment(self, segment, semaphore: Semaphore = None) -> pa.Table:
+        """
+        Download and decode the segment data into an Apache Arrow Table.
+        """
+        assert segment.encoding == "arrow", "fetch_and_read_segment can only be used with Arrow segments"
+        async with (semaphore if semaphore else nullcontext()):
+            raw_segment_data = await segment.segment.get_data()
+        buffer = pa.BufferReader(raw_segment_data)
+        reader = ipc.open_stream(buffer)
+        return reader.read_all()
 
+    async def fetchone_arrow(self) -> Optional[pa.Table]:
+        """
+        Fetch the next segment of the query result as an Apache Arrow Table.
+        """
+        segment = await self.fetchone()
+        if segment is None:
+            return None
+        arrow_segment = await self._fetch_and_read_arrow_segment(segment)
+        return arrow_segment
+    
+    async def fetchall_arrow(self) -> pa.Table:
+        """
+        Fetch the result of the query as an Apache Arrow Table.
+        """ 
+        semaphore = Semaphore(constants.MAX_PARALLEL_SEGMENT_RETRIEVAL)  # Limit concurrent downloads to s3
+        s3_tasks = []
+        while segment := await self.fetchone():
+            s3_tasks.append(asyncio.create_task(self._fetch_and_read_arrow_segment(segment, semaphore)))
+        segment_arrow_tables = await asyncio.gather(*s3_tasks)
+        # Concatenate all sub-tables into a single table
+        
+        return pa.concat_tables(segment_arrow_tables)
+            
 
 Date = datetime.date
 Time = datetime.time
