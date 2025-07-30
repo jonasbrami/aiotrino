@@ -31,6 +31,7 @@ from aiotrino.exceptions import NotSupportedError, TrinoQueryError, TrinoUserErr
 from aiotrino.mapper import RowMapperFactory
 from aiotrino.transaction import IsolationLevel
 from tests.integration.conftest import trino_version
+from aiotrino.client import SpooledSegment
 
 
 @pytest_asyncio.fixture(params=[None, "json+zstd", "json+lz4", "json"], loop_scope="session")
@@ -1963,10 +1964,12 @@ async def test_segments_cursor(trino_connection: Connection):
             legacy_primitive_types=False,
         )
         total = 0
+        assert any((isinstance(segment.segment, SpooledSegment) for segment in segments)), "Expected at least one spooled segment"
         for segment in segments:
             assert segment.encoding == trino_connection._client_session.encoding
-            assert isinstance(segment.segment.uri, str), f"Expected string for uri, got {segment.segment.uri}"
-            assert isinstance(segment.segment.ack_uri, str), f"Expected string for ack_uri, got {segment.segment.ack_uri}"
+            if isinstance(segment.segment, SpooledSegment): # Inline segment does not have uri and ack_uri
+                assert isinstance(segment.segment.uri, str), f"Expected string for uri, got {segment.segment.uri}"
+                assert isinstance(segment.segment.ack_uri, str), f"Expected string for ack_uri, got {segment.segment.ack_uri}"
             total += len([row async for row in SegmentIterator(segment, row_mapper)])
         assert total == 300875, f"Expected total rows 300875, got {total}"
 

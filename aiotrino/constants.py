@@ -11,9 +11,9 @@
 # limitations under the License.
 
 from typing import Any, Optional
-import os 
+import os
 
-DEFAULT_PORT = 8080
+DEFAULT_PORT = int(os.environ.get("TRINO_DEFAULT_PORT", 8080))
 DEFAULT_TLS_PORT = 443
 DEFAULT_SOURCE = "aiotrino-python-client"
 DEFAULT_CATALOG: Optional[str] = None

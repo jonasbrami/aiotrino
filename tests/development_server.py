@@ -72,7 +72,7 @@ def start_development_server(port=None, trino_version=TRINO_VERSION):
             .with_name("trino") \
             .with_network(network) \
             .with_env("TRINO_CONFIG_DIR", "/etc/trino") \
-            .with_bind_ports(DEFAULT_PORT, port)
+            .with_bind_ports(8080, DEFAULT_PORT)
 
         root = Path(__file__).parent.parent
 
