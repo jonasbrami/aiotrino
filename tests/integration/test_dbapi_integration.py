@@ -32,7 +32,12 @@ from aiotrino.mapper import RowMapperFactory
 from aiotrino.transaction import IsolationLevel
 from tests.integration.conftest import trino_version
 from aiotrino.client import SpooledSegment
+import pyarrow as pa
+from math import isclose
+import pytz
+import os 
 
+ARROW_SPOOLING_SUPPORTED = os.environ.get("TRINO_ARROW_SPOOLING_SUPPORTED", "true").lower() == "true"
 
 @pytest_asyncio.fixture(params=[None, "json+zstd", "json+lz4", "json"], loop_scope="session")
 async def trino_connection(request, run_trino) -> AsyncGenerator[Connection, None,]:
@@ -44,8 +49,18 @@ async def trino_connection(request, run_trino) -> AsyncGenerator[Connection, Non
     )
     yield conn
     await conn.close()
+    
+@pytest_asyncio.fixture(params=["arrow", "arrow+zstd"], loop_scope="session")
+async def trino_connection_with_arrow(request, run_trino) -> AsyncGenerator[Connection, None,]:
+    host, port = run_trino
+    encoding = request.param
 
-
+    conn = aiotrino.dbapi.Connection(
+        host=host, port=port, user="test", source="test", max_attempts=1, encoding=encoding
+    )
+    yield conn
+    await conn.close()
+    
 @pytest_asyncio.fixture(loop_scope="session")
 async def trino_connection_with_transaction(run_trino) -> AsyncGenerator[Connection, None]:
     host, port = run_trino
@@ -1974,6 +1989,155 @@ async def test_segments_cursor(trino_connection: Connection):
         assert total == 300875, f"Expected total rows 300875, got {total}"
 
 
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_segments_cursor_with_arrow(trino_connection_with_arrow: Connection):
+    query = """SELECT l.*
+        FROM tpch.tiny.lineitem l, TABLE(sequence(
+            start => 1,
+            stop => 5,
+            step => 1)) n
+        """
+            
+    arrow_cursor = await trino_connection_with_arrow.cursor("segment")
+    async with arrow_cursor:
+        await arrow_cursor.execute(query)
+        arrow_result = await arrow_cursor.fetchall_arrow()
+    
+    assert len(arrow_result) == 300875, f"Expected total rows 300875, got {len(arrow_result)}"
+    assert arrow_result.schema == pa.schema([
+        ("orderkey", pa.int64()),
+        ("partkey", pa.int64()),
+        ("suppkey", pa.int64()),
+        ("linenumber", pa.int32()),
+        ("quantity", pa.float64()),
+        ("extendedprice", pa.float64()),
+        ("discount", pa.float64()),
+        ("tax", pa.float64()),
+        ("returnflag", pa.string()),
+        ("linestatus", pa.string()),
+        ("shipdate", pa.date32()),
+        ("commitdate", pa.date32()),
+        ("receiptdate", pa.date32()),
+        ("shipinstruct", pa.string()),
+        ("shipmode", pa.string()),
+        ("comment", pa.string()),
+    ])
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_arrow_types(trino_connection_with_arrow: Connection):
+    query = """
+    SELECT 
+    CAST(9223372036854775807 AS BIGINT) AS bigint_val,
+    CAST(2147483647 AS INTEGER) AS integer_val,
+    CAST(32767 AS SMALLINT) AS smallint_val,
+    CAST(127 AS TINYINT) AS tinyint_val,
+    CAST(3.14159265359 AS DOUBLE) AS double_val,
+    CAST(3.14 AS REAL) AS real_val,
+    true AS boolean_val,
+    'Hello Arrow' AS varchar_val,
+    CAST('ABC' AS CHAR(3)) AS char_val,
+    X'48656C6C6F' AS varbinary_val,
+    DATE '2023-12-25' AS date_val,
+    CAST(123.456 AS DECIMAL(10,3)) AS decimal_val,
+    TIME '14:30:45.123' AS time_val,
+    TIME '14:30:45.123+05:30' AS time_with_timezone_val,
+    CAST(TIMESTAMP '2023-12-25 10:30:45' AS TIMESTAMP(0)) AS timestamp_0_val,
+    CAST(TIMESTAMP '2023-12-25 10:30:45.123' AS TIMESTAMP(3)) AS timestamp_3_val,
+    CAST(TIMESTAMP '2023-12-25 10:30:45.123456' AS TIMESTAMP(6)) AS timestamp_6_val,
+    CAST(TIMESTAMP '2023-12-25 10:30:45 America/New_York' AS TIMESTAMP(0) WITH TIME ZONE) AS timestamp_tz_0_val,
+    CAST(TIMESTAMP '2023-12-25 10:30:45.123 America/New_York' AS TIMESTAMP(3) WITH TIME ZONE) AS timestamp_tz_3_val,
+    CAST(TIMESTAMP '2023-12-25 10:30:45.123456 America/New_York' AS TIMESTAMP(6) WITH TIME ZONE) AS timestamp_tz_6_val,
+    null AS null_val
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetchall_arrow()
+    
+    expected_schema = pa.schema([
+    ("bigint_val", pa.int64()),
+    ("integer_val", pa.int32()),
+    ("smallint_val", pa.int16()),
+    ("tinyint_val", pa.int8()),
+    ("double_val", pa.float64()),
+    ("real_val", pa.float32()),
+    ("boolean_val", pa.bool_()),
+    ("varchar_val", pa.string()),
+    ("char_val", pa.string()),
+    ("varbinary_val", pa.binary()),
+    ("date_val", pa.date32()),
+    ("decimal_val", pa.decimal128(10, 3)),
+    ("time_val", pa.time32("ms")),
+    # time64 with timezone is not supported in PyArrow, the query result is converted to UTC during serialization server-side 
+    ("time_with_timezone_val", pa.time32("ms")),  # no timezone support here
+    # Timestamp precision tests - different precisions map to different PyArrow timestamp units
+    # Note: precision 1 and 2 are not supported for Arrow spooling
+    ("timestamp_0_val", pa.timestamp("s")),      # seconds precision
+    ("timestamp_3_val", pa.timestamp("ms")),     # milliseconds
+    ("timestamp_6_val", pa.timestamp("us")),     # microseconds
+    # Timestamp with timezone precision tests
+    ("timestamp_tz_0_val", pa.timestamp("s", tz="UTC")),    # seconds precision with timezone
+    ("timestamp_tz_3_val", pa.timestamp("ms", tz="UTC")),   # milliseconds with timezone
+    ("timestamp_tz_6_val", pa.timestamp("us", tz="UTC")),   # microseconds with timezone
+    ("null_val", pa.null())
+])
+    for i, column in enumerate(result.schema):
+        assert column.name == expected_schema[i].name, f"Expected column name {expected_schema[i].name}, got {column.name}"
+        assert column.type == expected_schema[i].type, f"Expected column type {expected_schema[i].type} for column {column.name}, got {column.type}"
+
+    local_tz = pytz.timezone("America/New_York")
+    
+    expected_result_content = {
+        "bigint_val": [9223372036854775807],
+        "integer_val": [2147483647],
+        "smallint_val": [32767],
+        "tinyint_val": [127],
+        "double_val": [3.14159265359],
+        "real_val": [3.14],
+        "boolean_val": [True],
+        "varchar_val": ["Hello Arrow"],
+        "char_val": ["ABC"],
+        "varbinary_val": [b"Hello"],
+        "date_val": [date(2023, 12, 25)],
+        "decimal_val": [Decimal("123.456")],
+        "time_val": [time(14, 30, 45, 123000)],
+        "time_with_timezone_val": [time(9, 0, 45, 123000)],
+        "timestamp_0_val": [datetime(2023, 12, 25, 10, 30, 45)],
+        "timestamp_3_val": [datetime(2023, 12, 25, 10, 30, 45, 123000)],
+        "timestamp_6_val": [datetime(2023, 12, 25, 10, 30, 45, 123456)],
+        "timestamp_tz_0_val": [local_tz.localize(datetime(2023, 12, 25, 10, 30, 45)).astimezone(pytz.UTC)],
+        "timestamp_tz_3_val": [local_tz.localize(datetime(2023, 12, 25, 10, 30, 45, 123000)).astimezone(pytz.UTC)],
+        "timestamp_tz_6_val": [local_tz.localize(datetime(2023, 12, 25, 10, 30, 45, 123456)).astimezone(pytz.UTC)],
+        "null_val": [None],
+    }
+    result_pydict = result.to_pydict()
+    for i, column in enumerate(result.schema):
+        if column.name == "real_val":
+            assert isclose(result_pydict[column.name][0], expected_result_content[column.name][0], rel_tol=1e-6)
+        else:
+            assert result_pydict[column.name] == expected_result_content[column.name], f"Expected {expected_result_content[column.name]} for column {column.name}, got {result_pydict[column.name]}"
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_fetch_one_arrow(trino_connection_with_arrow: Connection):
+    query = """
+    SELECT 1 AS int_val
+    """ 
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetchone_arrow()
+        #TODO improve
+    assert result.to_pydict() == {"int_val": [1]}
+    
 async def assert_cursor_description(cur: Cursor, trino_type, size=None, precision=None, scale=None):
     assert (await cur.get_description())[0][1] == trino_type
     assert (await cur.get_description())[0][2] is None

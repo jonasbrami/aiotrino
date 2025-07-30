@@ -294,9 +294,6 @@ class Connection(object):
         else:
             request = self._create_request()
 
-        if "arrow" in self._client_session.encoding:
-            cursor_style = "segment"
-
         cursor_class = {
             # Add any custom Cursor classes here
             "segment": SegmentCursor,
@@ -778,7 +775,7 @@ class SegmentCursor(Cursor):
         """
         Download and decode the segment data into an Apache Arrow Table.
         """
-        assert segment.encoding == "arrow", "fetch_and_read_segment can only be used with Arrow segments"
+        assert segment.encoding in ("arrow", "arrow+zstd"), "fetch_and_read_segment can only be used with Arrow segments"
         async with (semaphore if semaphore else nullcontext()):
             raw_segment_data = await segment.segment.get_data()
         buffer = pa.BufferReader(raw_segment_data)
