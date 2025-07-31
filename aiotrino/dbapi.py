@@ -777,6 +777,7 @@ class SegmentCursor(Cursor):
         """
         assert segment.encoding in ("arrow", "arrow+zstd"), "fetch_and_read_segment can only be used with Arrow segments"
         async with (semaphore if semaphore else nullcontext()):
+            logger.info(f"Fetching segment %s", segment)
             raw_segment_data = await segment.segment.get_data()
         buffer = pa.BufferReader(raw_segment_data)
         reader = ipc.open_stream(buffer)
