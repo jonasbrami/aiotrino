@@ -68,4 +68,5 @@ LENGTH_TYPES = ["char", "varchar"]
 PRECISION_TYPES = ["time", "time with time zone", "timestamp", "timestamp with time zone", "decimal"]
 SCALE_TYPES = ["decimal"]
 
-MAX_PARALLEL_SEGMENT_RETRIEVAL = int(os.environ.get("TRINO_MAX_PARALLEL_SEGMENT_RETRIEVAL", 100))
+MAX_PARALLEL_SEGMENT_RETRIEVAL = int(os.environ.get("TRINO_MAX_PARALLEL_SEGMENT_RETRIEVAL", 50))
+ARROW_THREAD_POOL_SIZE = int(os.environ.get("TRINO_ARROW_THREAD_POOL_SIZE", 5))
