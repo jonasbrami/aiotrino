@@ -64,7 +64,7 @@ aiotrino.constants.HEADERS = aiotrino.constants.PrestoHeaders
 
 ## Arrow Interface for High-Performance Data Fetching
 
-The arrow interface provides efficient columnar data transfer for large datasets. This feature works in conjunction with the Arrow spooling prototype implemented in the [Trino server fork](https://github.com/jonasbrami/trino).
+The arrow interface provides efficient columnar data transfer for large datasets. This feature works in conjunction with the Arrow spooling prototype implemented in the [Trino fork](https://github.com/jonasbrami/trino/tree/arrow_spooling).
 
 ### Why Arrow?
 
