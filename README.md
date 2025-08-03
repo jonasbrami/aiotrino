@@ -66,6 +66,15 @@ aiotrino.constants.HEADERS = aiotrino.constants.PrestoHeaders
 
 The arrow interface provides efficient columnar data transfer for large datasets. This feature works in conjunction with the Arrow spooling prototype implemented in the [Trino server fork](https://github.com/jonasbrami/trino).
 
+### Why Arrow?
+
+A common use case of Trino is to retrieve a large chunk of structured data from a Data lake for later processing using local data processing libraries such as DataFrame libraries, data science libraries...
+Large query output can be extremely slow to retrieve using Trino's pure python packages (aiotrino, trino-python-client) because of the huge deserialization cost.
+
+We aim to solve this issue by introducing Arrow format to Trino's Spooling protocol multiplying the throughput of deserialization by hundreds!
+
+This is achieved using fully asynchronous and parallel spooling segment retrieval and also leveraging the fact that PyArrow releases the GIL during the deserialization allowing true parallelism without the need for multiprocessing: Only coroutines (for the segment retrieval) and threads (for the arrow deserialization)
+
 ### Fetch All Results
 
 ```python
@@ -123,11 +132,36 @@ result = asyncio.run(fetch_single_result())
 
 ### Features
 
-- **Arrow Encoding**: High-performance columnar data format support
+- **Arrow Encoding**: In-memory columnar data format, support for 'arrow', 'arrow+zstd' encoding
 - **Flexible Fetching**: Use `fetchall_arrow()` for large datasets or `fetchone_arrow()` for single results
-- **Async/Await**: Fully asynchronous API
-- **Multiple Encodings**: Support for 'arrow', 'json+zstd', and other formats
-- **Easy Integration**: Works seamlessly with Polars, Pandas, and other data libraries
+- **Async**: Asynchronous segment retrieval and parallel deserialization
+- **Easy Integration**: Zero copy, (almost) zero deserialization overhead
+
+### Performance Bottlenecks Explained
+
+The main bottleneck in the JSON+ZSTD Trino python deserialization is that Python does not have any parallelism and we are flat at 100% CPU, most of the time spent on type mapping and casting from JSON to Python. 
+
+In the Trino python json encoding flow, there is no asynchronous retrieval of segments but it wouldn't really matter there because CPU is flat at 100%. Adding multiprocessing is tricky because of the extra cost of IPC and the complexity it adds.
+
+The regular JSON+ZSTD format is relatively slow compared to Arrow because Python is very slow at this kind of operation.
+
+### Benchmark 
+
+Arrow encoding demonstrates substantial performance gains for data-intensive queries, particularly beneficial for large result sets.
+Performance comparison between JSON+ZSTD and ARROW+ZSTD encoding shows significant improvements in query execution time using `SELECT * FROM tpcds.sf100000.store_sales LIMIT`. 
+
+In these experiments, we measure the time from the start of the execution of the query to the end of the deserialization on the client side. 
+
+![Benchmark Comparison](tests/benchmark/results/tpcds_table/benchmark_comparison.png)
+
+The previous results do not show the full extent of the Arrow speedup because the experiment was run against the tpcds.sf100000.store_sales on only 1 small Trino docker container, therefore it is not representative of real workloads. In real world examples the arrow speedup vs Java JDBC can be more than 20 folds depending on the size of the query result and the size of the Trino cluster.
+
+For example, we spun up a Trino cluster with 4 workers each having 6 CPUs and 48GB of RAM on EKS and using S3 for spooling.
+We got these results:
+
+![Benchmark Comparison](tests/benchmark/results/iceberg_table/benchmark_comparison.png)
+
+We can see that after switching to Arrow serialization with asynchronous segment retrieval and parallel deserialization, the bottleneck is now on the Trino cluster.
 
 # Basic Authentication
 The `BasicAuthentication` class can be used to connect to a LDAP-configured Trino
