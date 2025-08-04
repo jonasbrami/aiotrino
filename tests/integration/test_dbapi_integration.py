@@ -32,9 +32,15 @@ from aiotrino.mapper import RowMapperFactory
 from aiotrino.transaction import IsolationLevel
 from tests.integration.conftest import trino_version
 from aiotrino.client import SpooledSegment
-import pyarrow as pa
-import pyarrow.compute as pc
 from math import isclose
+
+# Optional pyarrow import for tests
+try:
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    PYARROW_AVAILABLE = True
+except ImportError:
+    PYARROW_AVAILABLE = False
 import pytz
 import os 
 from uuid import UUID
@@ -1996,6 +2002,7 @@ async def test_segments_cursor(trino_connection: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_segments_cursor_with_arrow(trino_connection_with_arrow: Connection):
     query = """SELECT l.*
         FROM tpch.tiny.lineitem l, TABLE(sequence(
@@ -2034,6 +2041,7 @@ async def test_segments_cursor_with_arrow(trino_connection_with_arrow: Connectio
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_numeric_types(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of numeric types."""
     query = """
@@ -2072,6 +2080,7 @@ async def test_arrow_numeric_types(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_string_types(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of string types."""
     query = """
@@ -2096,6 +2105,7 @@ async def test_arrow_string_types(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_binary_and_boolean(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of binary and boolean types."""
     query = """
@@ -2120,6 +2130,7 @@ async def test_arrow_binary_and_boolean(trino_connection_with_arrow: Connection)
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_date_time_types(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of date and time types."""
     query = """
@@ -2147,6 +2158,7 @@ async def test_arrow_date_time_types(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_timestamp_precisions(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of timestamps with different precisions."""
     query = """
@@ -2174,6 +2186,7 @@ async def test_arrow_timestamp_precisions(trino_connection_with_arrow: Connectio
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_timestamp_with_timezone(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of timestamps with timezone."""
     query = """
@@ -2202,6 +2215,7 @@ async def test_arrow_timestamp_with_timezone(trino_connection_with_arrow: Connec
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_decimal_type(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of decimal type."""
     query = """
@@ -2223,6 +2237,7 @@ async def test_arrow_decimal_type(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_uuid_type(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of UUID type."""
     query = """
@@ -2244,6 +2259,7 @@ async def test_arrow_uuid_type(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_interval_type(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of interval type."""
     query = """
@@ -2277,6 +2293,7 @@ async def test_arrow_interval_type(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_array_type(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of array type."""
     query = """
@@ -2298,6 +2315,7 @@ async def test_arrow_array_type(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_row_type(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of row/struct type."""
     query = """
@@ -2319,6 +2337,7 @@ async def test_arrow_row_type(trino_connection_with_arrow: Connection):
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_arrow_complex_nested_timestamps(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of complex nested structure with nanosecond timestamp arrays."""
     query = """
@@ -2458,6 +2477,7 @@ async def test_arrow_complex_nested_timestamps(trino_connection_with_arrow: Conn
     reason="Arrow spooling is not supported"
 )
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
 async def test_fetch_one_arrow(trino_connection_with_arrow: Connection):
     query = """
     SELECT 1 AS int_val
