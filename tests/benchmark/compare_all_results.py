@@ -5,13 +5,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import glob
+import sys
 from math import log2
-def read_all_results():
-    """Read all benchmark CSV files."""
+
+def read_all_results(directory="."):
+    """Read all benchmark CSV files from the specified directory."""
     results = {}
     
-    # Find all benchmark result files
-    csv_files = glob.glob("benchmark_results_*.csv")
+    # Find all benchmark result files in the specified directory
+    search_pattern = os.path.join(directory, "benchmark_results_*.csv")
+    csv_files = glob.glob(search_pattern)
     
     for csv_file in csv_files:
         # Extract client name from filename
@@ -36,16 +39,16 @@ def read_all_results():
     
     return results
 
-def create_comparison_graph(results):
-    """Create a comparison graph."""
+def create_comparison_graph(results, output_directory="."):
+    """Create a comparison graph and save it in the specified directory."""
     if not results:
         print("❌ No results to compare!")
         return
     
-    plt.figure(figsize=(15, 10))
+    plt.figure(figsize=(12, 8))
     
     # Plot 1: Throughput vs Dataset Size
-    plt.subplot(2, 3, 1)
+    plt.subplot(2, 2, 1)
     for client_name, df in results.items():
         plt.plot(df['rows'], df['rows_per_sec'], marker='o', label=client_name, linewidth=2)
     
@@ -58,7 +61,7 @@ def create_comparison_graph(results):
     plt.yscale('log')
     
     # Plot 2: Time vs Dataset Size
-    plt.subplot(2, 3, 2)
+    plt.subplot(2, 2, 2)
     for client_name, df in results.items():
         plt.plot(df['rows'], df['time_ms'], marker='s', label=client_name, linewidth=2)
     
@@ -71,7 +74,7 @@ def create_comparison_graph(results):
     plt.yscale('log')
     
     # Plot 3: Throughput by Number of rows
-    plt.subplot(2, 3, 3)
+    plt.subplot(2, 2, 3)
     for client_name, df in results.items():
         plt.plot(df['rows'], df['rows_per_sec'], marker='^', label=client_name, linewidth=2)
     
@@ -81,41 +84,9 @@ def create_comparison_graph(results):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.yscale('log')
-    
-    # Plot 4: Max Throughput Comparison
-    plt.subplot(2, 3, 4)
-    max_data = {}
-    for client_name, df in results.items():
-        max_data[client_name] = df['rows_per_sec'].max()
-    
-    clients = list(max_data.keys())
-    throughputs = list(max_data.values())
-    
-    bars = plt.bar(clients, throughputs, alpha=0.8, edgecolor='black')
-    plt.ylabel('Max Throughput (rows/sec)')
-    plt.title('Maximum Throughput Comparison')
-    plt.xticks(rotation=45)
-    
-    # Add value labels on bars
-    for bar, value in zip(bars, throughputs):
-        plt.text(bar.get_x() + bar.get_width()/2., bar.get_height() + max(throughputs)*0.01,
-                f'{value:,.0f}', ha='center', va='bottom', fontweight='bold')
-    
-    # Plot 5: Performance Evolution
-    plt.subplot(2, 3, 5)
-    for client_name, df in results.items():
-        efficiency = df['rows'] / df['time_ms']  # rows per millisecond
-        plt.plot(df['rows'], efficiency, marker='*', label=client_name, linewidth=2)
-    
-    plt.xlabel('Number of Rows')
-    plt.ylabel('Efficiency (rows/ms)')
-    plt.title('Processing Efficiency')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-    
-    # Plot 6: Summary Table
-    plt.subplot(2, 3, 6)
+        
+    # Plot 4: Summary Table
+    plt.subplot(2, 2, 4)
     plt.axis('off')
     
     summary_data = []
@@ -143,17 +114,27 @@ def create_comparison_graph(results):
         plt.title('Performance Summary', pad=20)
     
     plt.tight_layout()
-    plt.savefig('benchmark_comparison.png', dpi=300, bbox_inches='tight')
-    print("📊 Graph saved as benchmark_comparison.png")
+    output_path = os.path.join(output_directory, 'benchmark_comparison.png')
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"📊 Graph saved as {output_path}")
 
 def main():
     """Main function."""
-    print("📈 Comparing all benchmark results...")
+    # Parse command line arguments
+    if len(sys.argv) > 1:
+        directory = sys.argv[1]
+        if not os.path.isdir(directory):
+            print(f"❌ Directory '{directory}' does not exist!")
+            sys.exit(1)
+    else:
+        directory = "."
     
-    results = read_all_results()
+    print(f"📈 Comparing benchmark results in directory: {directory}")
+    
+    results = read_all_results(directory)
     
     if not results:
-        print("❌ No benchmark results found!")
+        print(f"❌ No benchmark results found in {directory}!")
         print("Run benchmarks first:")
         print("  ./run_all.sh")
         print("  # or individual:")
@@ -161,7 +142,7 @@ def main():
         print("  cd java-jdbc && mvn exec:java")
         return
     
-    create_comparison_graph(results)
+    create_comparison_graph(results, directory)
     
     print("\n🏆 Performance Summary:")
     max_rows = max([df['rows'].max() for df in results.values() if not df.empty])
