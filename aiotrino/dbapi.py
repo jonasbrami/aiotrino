@@ -801,7 +801,7 @@ class SegmentCursor(Cursor):
         """
         assert segment.encoding in ("arrow", "arrow+zstd"), "fetch_and_read_segment can only be used with Arrow segments"
         async with (max_parallel_segment_fetch_semaphore if max_parallel_segment_fetch_semaphore else nullcontext()):
-            logger.info(f"Fetching arrow segment %s", segment)
+            logger.debug(f"Fetching arrow segment %s", segment)
             raw_segment_data = await segment.segment.get_data()
         if arrow_thread_pool:
             return await asyncio.get_running_loop().run_in_executor(arrow_thread_pool, self._from_ipc_to_record_batch, raw_segment_data)
