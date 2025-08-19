@@ -91,12 +91,12 @@ async def fetch_large_query_result():
         host="your-trino-host",
         port=8080,
         user='your-username',
-        encoding='arrow'  # Enable Arrow encoding for better performance
+        encoding="arrow+zstd"
     ) as conn:
-        cursor = await conn.cursor()
+        cursor = await conn.cursor(cursor_style="segment")
         async with cursor as cur:
             await cur.execute(query)
-            # Fetch all results as Arrow table
+            # Fetch all the query output as Arrow table
             arrow_table = await cur.fetchall_arrow()
             print(f"Fetched {len(arrow_table)} rows")
             return arrow_table
@@ -120,12 +120,13 @@ async def fetch_single_result():
         user='your-username',
         encoding='arrow'
     ) as conn:
-        cursor = await conn.cursor()
+        cursor = await conn.cursor(cursor_style="segment")
         async with cursor as cur:
             await cur.execute(query)
-            # Fetch single result as Arrow table
-            arrow_table = await cur.fetchone_arrow()
-            return arrow_table
+            # Fetch single segment as an arrow table
+            # Allows to stream query result to client
+            while arrow_table_segment := await cur.fetchone_arrow()
+                process(arrow_table_segment)
 
 result = asyncio.run(fetch_single_result())
 ```
@@ -133,7 +134,7 @@ result = asyncio.run(fetch_single_result())
 ### Features
 
 - **Arrow Encoding**: In-memory columnar data format, support for 'arrow', 'arrow+zstd' encoding
-- **Flexible Fetching**: Use `fetchall_arrow()` for large datasets or `fetchone_arrow()` for single results
+- **Flexible Fetching**: Use `fetchall_arrow()` for resultset that can fit in memory or use `fetchone_arrow()` for streaming result to client.
 - **Async**: Asynchronous segment retrieval and parallel deserialization
 - **Easy Integration**: Zero copy, (almost) zero deserialization overhead
 
