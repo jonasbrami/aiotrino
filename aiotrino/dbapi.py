@@ -804,9 +804,14 @@ class SegmentCursor(Cursor):
             logger.debug(f"Fetching arrow segment %s", segment)
             raw_segment_data = await segment.segment.get_data()
         if arrow_thread_pool:
-            return await asyncio.get_running_loop().run_in_executor(arrow_thread_pool, self._from_ipc_to_record_batch, raw_segment_data)
+            arrow_segment = await asyncio.get_running_loop().run_in_executor(arrow_thread_pool, self._from_ipc_to_record_batch, raw_segment_data)
         else:
-            return self._from_ipc_to_record_batch(raw_segment_data)
+            arrow_segment =  self._from_ipc_to_record_batch(raw_segment_data)
+             
+        if isinstance(segment.segment, aiotrino.client.SpooledSegment):
+            await segment.segment.acknowledge()
+        
+        return arrow_segment
 
     async def fetchone_arrow(self) -> Optional["pa.Table"]:
         """
