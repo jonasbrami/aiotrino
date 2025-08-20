@@ -75,13 +75,13 @@ We aim to solve this issue by introducing Arrow format to Trino's Spooling proto
 
 This is achieved using fully asynchronous and parallel spooling segment retrieval and also leveraging the fact that PyArrow releases the GIL during the deserialization allowing true parallelism without the need for multiprocessing: Only coroutines (for the segment retrieval) and threads (for the arrow deserialization)
 
-### Fetch All Results
+### Fetch the whole query output (Fast but require the client to have enough memory to hold the whole query output)
 
 ```python
 import aiotrino
 import asyncio
 
-async def fetch_large_query_result():
+async def fetch_everything_in_memory():
     query = """
     SELECT * FROM your_catalog.your_schema.your_table 
     LIMIT 1000000
@@ -102,16 +102,16 @@ async def fetch_large_query_result():
             return arrow_table
 
 # Run the async function
-arrow_table = asyncio.run(fetch_large_query_result())
+arrow_table = asyncio.run(fetch_everything_in_memory())
 ```
 
-### Fetch Single Result
+### Fetch segment per segment (The client can stream the query output segment per segment)
 
 ```python
 import aiotrino
 import asyncio
 
-async def fetch_single_result():
+async def stream_segment_per_segment():
     query = "SELECT COUNT(*) as total_rows FROM your_catalog.your_schema.your_table"
     
     async with aiotrino.dbapi.connect(
@@ -128,7 +128,7 @@ async def fetch_single_result():
             while arrow_table_segment := await cur.fetchone_arrow()
                 process(arrow_table_segment)
 
-result = asyncio.run(fetch_single_result())
+result = asyncio.run(stream_segment_per_segment())
 ```
 
 ### Features
