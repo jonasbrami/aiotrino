@@ -2,78 +2,54 @@
 
 Simple benchmark suite to compare Trino client performance across different encodings.
 
-## Quick Start
-
-```bash
-# Run all benchmarks with defaults
-./run_all.sh
-
-# Compare results
-python compare_all_results.py
-```
-
 ## Benchmarks Included
 
-- **Python JSON+ZSTD**: aiotrino client with JSON+ZSTD encoding
-- **Python Arrow+ZSTD**: aiotrino client with Arrow+ZSTD encoding  
+- **Python Arrow+ZSTD**: aiotrino client with Arrow+ZSTD encoding
+- **Python JSON+ZSTD**: aiotrino client with JSON+ZSTD encoding  
 - **Java JDBC**: Standard Trino JDBC driver
 
-## Configuration
+## Usage
 
-All benchmarks use environment variables for configuration:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TRINO_HOST` | localhost | Trino server hostname |
-| `TRINO_PORT` | 8092 | Trino server port |
-| `TRINO_USER` | test | Trino username |
-| `QUERY_TEMPLATE` | `SELECT * FROM tpcds.sf100000.store_sales LIMIT {}` | SQL query template |
-| `MIN_POWER` | 10 | Minimum power of 2 (2^10 = 1,024 rows) |
-| `MAX_POWER` | 24 | Maximum power of 2 (2^24 = 16M rows) |
-| `POWER_STEP` | 2 | Step between powers |
-
-## Examples
-
+### Run All Benchmarks
 ```bash
-# Quick test with smaller dataset
-MAX_POWER=16 ./run_all.sh
-
-# Custom query (just 3 columns)
-QUERY_TEMPLATE="SELECT ss_item_sk, ss_quantity, ss_sales_price FROM tpcds.sf100000.store_sales LIMIT {}" ./run_all.sh
-
-# Different Trino server
-TRINO_HOST=my-server TRINO_PORT=8080 ./run_all.sh
-
-# Individual benchmark
-ENCODING=arrow+zstd MAX_POWER=20 python run_benchmark.py
+./run_all.sh --host HOST --port PORT --user USER --query "SQL" --outdir /path/to/results
 ```
 
-## Individual Tools
+### Individual Benchmarks
 
-### Python Benchmark
+#### Python Benchmark
 ```bash
-# Show help
-python run_benchmark.py --help
-
-# Run with specific encoding
-ENCODING=json+zstd python run_benchmark.py
+python run_benchmark.py --host HOST --port PORT --user USER --encoding ENCODING --query "SQL" --outdir /path/to/results
 ```
 
-### Java Benchmark
+#### Java Benchmark
 ```bash
 cd java-jdbc
-mvn compile exec:java
+mvn exec:java -Dexec.args="--host HOST --port PORT --user USER --query SQL --outdir /path/to/results"
 ```
 
 ### Compare Results
 ```bash
-python compare_all_results.py
+python compare_all_results.py /path/to/results
 ```
 
-## Output Files
+## Examples
 
-- `benchmark_results_*.csv`: Raw benchmark data
-- `benchmark_comparison.png`: Performance comparison graph
+```bash
+# Run all benchmarks
+./run_all.sh --host localhost --port 8080 --user test --query "SELECT * FROM table LIMIT 1000000" --outdir results/my_test
+
+# Individual Python Arrow benchmark
+python run_benchmark.py --host localhost --port 8080 --user test --encoding arrow+zstd --query "SELECT * FROM table LIMIT 1000000" --outdir results/my_test
+
+# Compare results
+python compare_all_results.py results/my_test
+```
+
+## Output
+
+- **CSV Files**: `benchmark_results_{encoding}.csv` with columns: `rows`, `time_ms`
+- **Comparison Graph**: `benchmark_comparison.png` with throughput analysis
 
 ## Requirements
 

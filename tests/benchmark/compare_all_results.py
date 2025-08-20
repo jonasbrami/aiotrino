@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import os
 import glob
 import sys
+import argparse
 from math import log2
 
 def read_all_results(directory="."):
@@ -32,8 +33,18 @@ def read_all_results(directory="."):
         
         if os.path.exists(csv_file):
             df = pd.read_csv(csv_file)
-            results[client_name] = df
-            print(f"✅ Loaded {client_name}: {len(df)} results")
+            # Always compute throughput from rows and time_ms
+            if {'rows','time_ms'}.issubset(df.columns):
+                # Ensure numeric types and compute throughput
+                df['rows'] = pd.to_numeric(df['rows'], errors='coerce')
+                df['time_ms'] = pd.to_numeric(df['time_ms'], errors='coerce')
+                df['rows_per_sec'] = df.apply(
+                    lambda r: (r['rows'] / (r['time_ms'] / 1000.0)) if r['time_ms'] and r['time_ms'] > 0 else float('nan'), axis=1
+                )
+                results[client_name] = df
+                print(f"✅ Loaded {client_name}: {len(df)} results")
+            else:
+                print(f"⚠️  Skipping {client_name}: missing required columns (rows, time_ms)")
         else:
             print(f"❌ Missing {csv_file}")
     
@@ -120,29 +131,24 @@ def create_comparison_graph(results, output_directory="."):
 
 def main():
     """Main function."""
-    # Parse command line arguments
-    if len(sys.argv) > 1:
-        directory = sys.argv[1]
-        if not os.path.isdir(directory):
-            print(f"❌ Directory '{directory}' does not exist!")
-            sys.exit(1)
-    else:
-        directory = "."
+    parser = argparse.ArgumentParser(description="Compare benchmark results from CSV files in a directory.")
+    parser.add_argument("directory", help="Directory containing benchmark CSV files")
+    args = parser.parse_args()
     
-    print(f"📈 Comparing benchmark results in directory: {directory}")
+    if not os.path.isdir(args.directory):
+        print(f"❌ Directory '{args.directory}' does not exist!")
+        sys.exit(1)
     
-    results = read_all_results(directory)
+    print(f"📈 Comparing benchmark results in directory: {args.directory}")
+    
+    results = read_all_results(args.directory)
     
     if not results:
-        print(f"❌ No benchmark results found in {directory}!")
-        print("Run benchmarks first:")
-        print("  ./run_all.sh")
-        print("  # or individual:")
-        print("  python run_benchmark.py")
-        print("  cd java-jdbc && mvn exec:java")
+        print(f"❌ No benchmark results found in {args.directory}!")
+        print("Run benchmarks first with --outdir pointing to this directory")
         return
     
-    create_comparison_graph(results, directory)
+    create_comparison_graph(results, args.directory)
     
     print("\n🏆 Performance Summary:")
     max_rows = max([df['rows'].max() for df in results.values() if not df.empty])

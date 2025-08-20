@@ -3,49 +3,93 @@
 # Simple script to run all Trino benchmarks
 set -e
 
+# Parse command line arguments
+HOST="localhost"
+PORT="8092"
+USER="test"
+QUERY=""
+OUTDIR=""
+
+usage() {
+    echo "Usage: $0 --host HOST --port PORT --user USER --query \"SQL\" --outdir /path/to/results"
+    echo ""
+    echo "Options:"
+    echo "  --host     Trino server host (default: localhost)"
+    echo "  --port     Trino server port (default: 8092)"
+    echo "  --user     Trino user (default: test)"
+    echo "  --query    SQL query to execute (required)"
+    echo "  --outdir   Output directory for results (required)"
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --host)
+            HOST="$2"
+            shift 2
+            ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
+        --user)
+            USER="$2"
+            shift 2
+            ;;
+        --query)
+            QUERY="$2"
+            shift 2
+            ;;
+        --outdir)
+            OUTDIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [[ -z "$QUERY" || -z "$OUTDIR" ]]; then
+    echo "❌ Missing required arguments"
+    usage
+fi
+
 echo "🚀 Running all Trino benchmarks..."
+echo "📝 Host: $HOST:$PORT"
+echo "👤 User: $USER"
+echo "🗂️  Output: $OUTDIR"
+echo "📋 Query: $QUERY"
 echo
 
-# Get configuration from environment or use defaults
-export TRINO_HOST=${TRINO_HOST:-localhost}
-export TRINO_PORT=${TRINO_PORT:-8092}
-export TRINO_USER=${TRINO_USER:-test}
-# Default Python query template (with {})
-export QUERY_TEMPLATE=${QUERY_TEMPLATE:-"SELECT * FROM tpcds.sf100000.store_sales LIMIT {}"}
-# Java query template (with %d) - convert {} to %d for Java
-export JAVA_QUERY_TEMPLATE=${JAVA_QUERY_TEMPLATE:-$(echo "$QUERY_TEMPLATE" | sed 's/{}/\%d/g')}
-export MIN_POWER=${MIN_POWER:-10}
-export MAX_POWER=${MAX_POWER:-24}
-export POWER_STEP=${POWER_STEP:-2}
-
-# Activate Python virtual environment if it exists
-if [ -f "../../.venv/bin/activate" ]; then
-    echo "📦 Activating Python virtual environment..."
-    source ../../.venv/bin/activate
-fi
+# Create output directory
+mkdir -p "$OUTDIR"
 
 # Run Python benchmarks
 echo "=== Python JSON+ZSTD Benchmark ==="
-ENCODING=json+zstd MAX_POWER=22 python run_benchmark.py
+python run_benchmark.py --host "$HOST" --port "$PORT" --user "$USER" --encoding json+zstd --query "$QUERY" --outdir "$OUTDIR"
 
 echo
 echo "=== Python Arrow+ZSTD Benchmark ==="
-ENCODING=arrow+zstd python run_benchmark.py
+python run_benchmark.py --host "$HOST" --port "$PORT" --user "$USER" --encoding arrow+zstd --query "$QUERY" --outdir "$OUTDIR"
 
 echo
 echo "=== Java JDBC Benchmark ==="
 cd java-jdbc
-# Export Java-specific query template
-export QUERY_TEMPLATE="$JAVA_QUERY_TEMPLATE"
-mvn -q compile exec:java
+mvn -q exec:java -Dexec.args="--host $HOST --port $PORT --user $USER --query $QUERY --outdir ../$OUTDIR"
 cd ..
 
 echo
 echo "🎉 All benchmarks completed!"
 echo
 echo "📊 Generated files:"
-ls -la benchmark_results_*.csv
+ls -la "$OUTDIR"/*.csv
 
 echo
 echo "💡 To compare results, run:"
-echo "  python compare_all_results.py" 
+echo "  python compare_all_results.py \"$OUTDIR\"" 
