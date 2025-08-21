@@ -130,7 +130,6 @@ async def stream_segment_per_segment():
 
 result = asyncio.run(stream_segment_per_segment())
 ```
-
 ### Features
 
 - **Arrow Encoding**: In-memory columnar data format, support for 'arrow', 'arrow+zstd' encoding
@@ -155,26 +154,22 @@ In these experiments, we measure the time from the start of the execution of the
 
 ![Benchmark Comparison](tests/benchmark/results/tpcds_table/benchmark_comparison.png)
 
-The previous results do not show the full extent of the Arrow speedup because the experiment was run against the tpcds.sf100000.store_sales on only 1 small Trino docker container, therefore it is not representative of real workloads. In real world examples the arrow speedup vs Java JDBC can be more than 20 folds depending on the size of the query result and the size of the Trino cluster.
+The previous results do not show the full extent of the Arrow speedup because the experiment was run against the tpcds.sf100000.store_sales on only 1 small Trino docker container, therefore it is not representative of real workloads. In real world examples the arrow speedup vs Java JDBC can be more than 50 folds depending on the size of the query result and the size of the Trino cluster.
 
-For example, we spun up a Trino cluster with 4 workers each having 6 CPUs and 48GB of RAM on EKS and using S3 for spooling.
-In the following examples, we ran queries of the form `select * from some_iceberg_table where some_attribute in range...`
-The schema of the Iceberg table is: 7 doubles, 2 varchar, 1 bigint, 1 timestamp
+To really push the arrow speedup, we scaled up to a larger setup:
+- 4 workers each having 16 CPUs and 128GB of RAM  
+- Used a well compacted iceberg table instead of runtime generated tpcds table
+- Iceberg table schema: 7 doubles, 2 varchar, 1 bigint, 1 timestamp
+- Used Minio on an i3en node instead of AWS S3 for spooling
 
-We got these results:
+We ran queries of the form `select * from some_iceberg_table where some_attribute in range...`
 
-![Benchmark Comparison](tests/benchmark/results/iceberg_table/benchmark_comparison.png)
+Results from this larger cluster setup:
+![Benchmark Comparison](tests/benchmark/results/iceberg_table_large_cluster_minio/benchmark_comparison.png)
 
-We can see that after switching to Arrow serialization with asynchronous segment retrieval and parallel deserialization, the bottleneck is now on the Trino cluster.
+The JDBC connector hits a client CPU bottleneck at 700K rows/sec. But Aiotrino with PyArrow keeps scaling up with the data size and cluster size, showing a 50x speedup vs JDBC Trino connector and 400x speedup vs the base trino python client.
 
-If we scale up our Trino cluster to have 12 workers each having 6 CPUs and 48GB of RAM, this is the result we get:
-![Benchmark Comparison](tests/benchmark/results/iceberg_table_large_cluster/benchmark_comparison.png)
-
-We can see that in the case of the JDBC connector, the throughput is bottleneck by client CPU at 500K Rows/sec, however
-the Aiotrino with PyArrow example keeps scaling up with the size of the data and the size of the cluster showing a 20x speedup compared to JDBC
-
-In short, this new Aiotrino with Arrow support can give up to 20 folds speedup vs Java/JDBC and over 100 folds speed up version the current pure python based clients. 
-
+After switching from JSON to ARROW, The bottleneck ends up to be how fast can Trino scan the Iceberg table in object storage and how fast can the client.
 
 # Basic Authentication
 The `BasicAuthentication` class can be used to connect to a LDAP-configured Trino

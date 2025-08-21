@@ -72,16 +72,17 @@ mkdir -p "$OUTDIR"
 
 # Run Python benchmarks
 echo "=== Python JSON+ZSTD Benchmark ==="
-python run_benchmark.py --host "$HOST" --port "$PORT" --user "$USER" --encoding json+zstd --query "$QUERY" --outdir "$OUTDIR"
+python3 run_benchmark.py --host "$HOST" --port "$PORT" --user "$USER" --encoding json+zstd --query "$QUERY" --outdir "$OUTDIR"
 
 echo
 echo "=== Python Arrow+ZSTD Benchmark ==="
-python run_benchmark.py --host "$HOST" --port "$PORT" --user "$USER" --encoding arrow+zstd --query "$QUERY" --outdir "$OUTDIR"
+python3 run_benchmark.py --host "$HOST" --port "$PORT" --user "$USER" --encoding arrow+zstd --query "$QUERY" --outdir "$OUTDIR"
 
 echo
 echo "=== Java JDBC Benchmark ==="
 cd java-jdbc
-mvn -q exec:java -Dexec.args="--host $HOST --port $PORT --user $USER --query $QUERY --outdir ../$OUTDIR"
+# Use single quotes around entire args and escape internal quotes
+mvn -q exec:java -Dexec.args='--host '"$HOST"' --port '"$PORT"' --user '"$USER"' --query "'"$QUERY"'" --outdir ../'"$OUTDIR"
 cd ..
 
 echo
@@ -92,4 +93,4 @@ ls -la "$OUTDIR"/*.csv
 
 echo
 echo "💡 To compare results, run:"
-echo "  python compare_all_results.py \"$OUTDIR\"" 
+echo "  python3 compare_all_results.py \"$OUTDIR\""

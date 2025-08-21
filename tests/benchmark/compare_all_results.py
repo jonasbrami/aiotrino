@@ -7,7 +7,6 @@ import os
 import glob
 import sys
 import argparse
-from math import log2
 
 def read_all_results(directory="."):
     """Read all benchmark CSV files from the specified directory."""
@@ -38,8 +37,9 @@ def read_all_results(directory="."):
                 # Ensure numeric types and compute throughput
                 df['rows'] = pd.to_numeric(df['rows'], errors='coerce')
                 df['time_ms'] = pd.to_numeric(df['time_ms'], errors='coerce')
+                df['time_sec'] = df['time_ms'] / 1000.0  # Convert to seconds
                 df['rows_per_sec'] = df.apply(
-                    lambda r: (r['rows'] / (r['time_ms'] / 1000.0)) if r['time_ms'] and r['time_ms'] > 0 else float('nan'), axis=1
+                    lambda r: (r['rows'] / r['time_sec']) if r['time_sec'] and r['time_sec'] > 0 else float('nan'), axis=1
                 )
                 results[client_name] = df
                 print(f"✅ Loaded {client_name}: {len(df)} results")
@@ -56,72 +56,52 @@ def create_comparison_graph(results, output_directory="."):
         print("❌ No results to compare!")
         return
     
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 5))
     
-    # Plot 1: Throughput vs Dataset Size
-    plt.subplot(2, 2, 1)
+    # Plot 1: Throughput vs Output Rows
+    plt.subplot(1, 3, 1)
     for client_name, df in results.items():
         plt.plot(df['rows'], df['rows_per_sec'], marker='o', label=client_name, linewidth=2)
     
-    plt.xlabel('Number of Rows')
+    plt.xlabel('Output Rows')
     plt.ylabel('Throughput (rows/sec)')
-    plt.title('Throughput vs Dataset Size')
+    plt.title('Throughput vs Output Rows')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.xscale('log')
     plt.yscale('log')
     
-    # Plot 2: Time vs Dataset Size
-    plt.subplot(2, 2, 2)
+    # Plot 2: Execution Time vs Output Rows
+    plt.subplot(1, 3, 2)
     for client_name, df in results.items():
-        plt.plot(df['rows'], df['time_ms'], marker='s', label=client_name, linewidth=2)
+        plt.plot(df['rows'], df['time_sec'], marker='s', label=client_name, linewidth=2)
     
-    plt.xlabel('Number of Rows')
-    plt.ylabel('Time (ms)')
-    plt.title('Execution Time vs Dataset Size')
+    plt.xlabel('Output Rows')
+    plt.ylabel('Time (sec)')
+    plt.title('Execution Time vs Output Rows')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.xscale('log')
-    plt.yscale('log')
     
-    # Plot 3: Throughput by Number of rows
-    plt.subplot(2, 2, 3)
-    for client_name, df in results.items():
-        plt.plot(df['rows'], df['rows_per_sec'], marker='^', label=client_name, linewidth=2)
-    
-    plt.xlabel('Number of Rows')
-    plt.ylabel('Throughput (rows/sec)')
-    plt.title('Throughput by Number of rows')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-        
-    # Plot 4: Summary Table
-    plt.subplot(2, 2, 4)
+    # Plot 3: Summary Table
+    plt.subplot(1, 3, 3)
     plt.axis('off')
     
     summary_data = []
     for client_name, df in results.items():
-        avg_throughput = df['rows_per_sec'].mean()
         max_throughput = df['rows_per_sec'].max()
-        total_rows = df['rows'].sum()
-        total_time = df['time_ms'].sum() / 1000  # seconds
         summary_data.append([
-            client_name[:15],  # Truncate long names
-            f'{avg_throughput:,.0f}',
-            f'{max_throughput:,.0f}',
-            f'{total_rows:,.0f}',
-            f'{total_time:.1f}s'
+            client_name,  # Full client name, no truncation
+            f'{max_throughput:,.0f}'
         ])
     
     if summary_data:
         table = plt.table(cellText=summary_data,
-                         colLabels=['Client', 'Avg T/put', 'Max T/put', 'Total Rows', 'Total Time'],
+                         colLabels=['Client', 'Max Throughput (rows/sec)'],
                          cellLoc='center',
                          loc='center')
         table.auto_set_font_size(False)
-        table.set_fontsize(8)
-        table.scale(1.2, 1.5)
+        table.set_fontsize(9)
+        table.scale(1.4, 1.8)  # Wider table to fit full names
         plt.title('Performance Summary', pad=20)
     
     plt.tight_layout()
@@ -159,18 +139,18 @@ def main():
         max_row = df[df['rows'] == max_rows]
         if not max_row.empty:
             throughput = max_row['rows_per_sec'].iloc[0]
-            time_ms = max_row['time_ms'].iloc[0]
-            max_scale_data.append((client_name, throughput, time_ms))
+            time_sec = max_row['time_sec'].iloc[0]
+            max_scale_data.append((client_name, throughput, time_sec))
     
     # Sort by throughput descending
     max_scale_data.sort(key=lambda x: x[1], reverse=True)
     
-    print(f"{'Client':<20} | {'Throughput (rows/s)':<20} | {'Time (ms)':<12}")
+    print(f"{'Client':<20} | {'Throughput (rows/sec)':<20} | {'Time (sec)':<12}")
     print(f"{'-'*20} | {'-'*20} | {'-'*12}")
-    for client, throughput, time_ms in max_scale_data:
-        print(f"{client:<20} | {throughput:>15,.0f} | {time_ms:>8,.0f}")
+    for client, throughput, time_sec in max_scale_data:
+        print(f"{client:<20} | {throughput:>15,.0f} | {time_sec:>8,.1f}")
     
     print(f"\n🎉 Comparison complete!")
 
 if __name__ == "__main__":
-    main() 
+    main()
