@@ -31,17 +31,18 @@ services:
     restart: "no"
 
   init-catalog-db:
-    image: alpine:3.19
+    build:
+      context: .
+      dockerfile: init-catalog-db.Dockerfile
     container_name: init-catalog-db
     volumes:
       - catalog-db:/var/trino
-      - ./scripts/init-catalog-db.sh:/init.sh:ro
-    command: >
-      sh -c "apk add --no-cache sqlite > /dev/null 2>&1 && sh /init.sh"
     restart: "no"
 
   trino:
-    image: jonasbrami/trino-arrow:479-03d1b24
+    build:
+      context: .
+      dockerfile: trino.Dockerfile
     container_name: trino
     depends_on:
       init-s3:
@@ -51,12 +52,6 @@ services:
     ports:
       - "127.0.0.1:8085:8080"
     volumes:
-      - ./etc/config.properties:/etc/trino/config.properties:ro
-      - ./etc/jvm.config:/etc/trino/jvm.config:ro
-      - ./etc/spooling-manager.properties:/etc/trino/spooling-manager.properties:ro
-      - ./etc/catalog/tpch.properties:/etc/trino/catalog/tpch.properties:ro
-      - ./etc/catalog/iceberg.properties:/etc/trino/catalog/iceberg.properties:ro
-      - ./lib/sqlite-jdbc.jar:/usr/lib/trino/plugin/iceberg/sqlite-jdbc.jar:ro
       - catalog-db:/var/trino
     healthcheck:
       test: ["CMD", "trino", "--execute", "SELECT 1"]
@@ -66,14 +61,13 @@ services:
       start_period: 20s
 
   generate-data:
-    image: jonasbrami/trino-arrow:479-03d1b24
+    build:
+      context: .
+      dockerfile: trino.Dockerfile
     container_name: generate-data
     depends_on:
       trino:
         condition: service_healthy
-    volumes:
-      - ./scripts/generate-data.sql:/tmp/generate-data.sql:ro
-      - ./scripts/generate-data.sh:/tmp/generate-data.sh:ro
     entrypoint: ["sh", "/tmp/generate-data.sh"]
     restart: "no"
 
@@ -90,9 +84,6 @@ services:
     environment:
       TRINO_HOST: trino
       TRINO_PORT: "8080"
-    volumes:
-      - ./examples:/app/examples:ro
-      - ./scripts/run-client.sh:/app/run-client.sh:ro
 
 volumes:
   catalog-db:

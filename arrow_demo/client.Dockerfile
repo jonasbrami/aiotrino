@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Install Java for JDBC benchmark, plus git for pip install from GitHub
 RUN apt-get update && \
@@ -17,9 +17,13 @@ RUN mkdir -p /app/lib && \
     curl -fSL -o /app/lib/trino-jdbc.jar \
     "https://repo1.maven.org/maven2/io/trino/trino-jdbc/${TRINO_JDBC_VERSION}/trino-jdbc-${TRINO_JDBC_VERSION}.jar"
 
-# Copy and compile Java benchmark to /app/java (separate from mounted /app/examples)
+# Copy and compile Java benchmark
 COPY examples/JdbcBenchmark.java /app/java/
 RUN javac -cp /app/lib/trino-jdbc.jar /app/java/JdbcBenchmark.java
+
+# Copy Python examples and entrypoint script
+COPY examples/ /app/examples/
+COPY scripts/run-client.sh /app/run-client.sh
 
 # Default env for running inside docker network
 ENV TRINO_HOST=trino
