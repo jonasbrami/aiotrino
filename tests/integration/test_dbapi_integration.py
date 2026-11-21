@@ -2014,7 +2014,7 @@ async def test_segments_cursor_with_arrow(trino_connection_with_arrow: Connectio
     arrow_cursor = await trino_connection_with_arrow.cursor("segment")
     async with arrow_cursor:
         await arrow_cursor.execute(query)
-        arrow_result = await arrow_cursor.fetchall_arrow()
+        arrow_result = await arrow_cursor.fetch_arrow_table()
     
     assert len(arrow_result) == 300875, f"Expected total rows 300875, got {len(arrow_result)}"
     assert arrow_result.schema == pa.schema([
@@ -2055,7 +2055,7 @@ async def test_arrow_numeric_types(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     # Verify schema
     assert result.schema[0].name == "bigint_val" and result.schema[0].type == pa.int64()
@@ -2090,7 +2090,7 @@ async def test_arrow_string_types(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.string()
     assert result.schema[1].type == pa.string()
@@ -2115,7 +2115,7 @@ async def test_arrow_binary_and_boolean(trino_connection_with_arrow: Connection)
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.binary()
     assert result.schema[1].type == pa.bool_()
@@ -2141,7 +2141,7 @@ async def test_arrow_date_time_types(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.date32()
     assert result.schema[1].type == pa.time32("ms")
@@ -2169,7 +2169,7 @@ async def test_arrow_timestamp_precisions(trino_connection_with_arrow: Connectio
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.timestamp("s")
     assert result.schema[1].type == pa.timestamp("ms")
@@ -2197,7 +2197,7 @@ async def test_arrow_timestamp_with_timezone(trino_connection_with_arrow: Connec
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.timestamp("s", tz="UTC")
     assert result.schema[1].type == pa.timestamp("ms", tz="UTC")
@@ -2224,7 +2224,7 @@ async def test_arrow_decimal_type(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.decimal128(10, 3)
     
@@ -2246,7 +2246,7 @@ async def test_arrow_uuid_type(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert str(result.schema[0].type) == "extension<arrow.uuid>"
     
@@ -2263,7 +2263,7 @@ async def test_arrow_uuid_type(trino_connection_with_arrow: Connection):
 async def test_arrow_interval_type(trino_connection_with_arrow: Connection):
     """Test Arrow serialization of interval type."""
     query = """
-    SELECT 
+    SELECT
     INTERVAL '3' DAY AS three_days,
     INTERVAL '25' HOUR AS twentyfive_hours,
     INTERVAL '90' MINUTE AS ninety_minutes,
@@ -2271,21 +2271,273 @@ async def test_arrow_interval_type(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
-    
-    # Verify schema has correct interval types
-    assert str(result.schema[0].type) == "day_time_interval"
-    assert str(result.schema[1].type) == "day_time_interval"
-    assert str(result.schema[2].type) == "day_time_interval"
-    assert str(result.schema[3].type) == "day_time_interval"
-    
-    # PyArrow limitation: cannot read interval values
-    # Verify to_pydict() fails due to lack of interval conversion support
+        result = await cur.fetch_arrow_table()
+
+    # INTERVAL DAY TO SECOND is encoded as a duration in microseconds
+    for field in result.schema:
+        assert field.type == pa.duration("us"), field.name
+
+    assert result.to_pydict() == {
+        "three_days": [timedelta(days=3)],
+        "twentyfive_hours": [timedelta(hours=25)],
+        "ninety_minutes": [timedelta(minutes=90)],
+        "complex_interval": [timedelta(days=1, hours=12, minutes=30, seconds=45, milliseconds=678)],
+    }
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_interval_precision_0(trino_connection_with_arrow: Connection):
+    """Day-time intervals without fractional seconds (parametric interval types)."""
+    query = """
+    SELECT
+    CAST(INTERVAL '1 02:03:04' DAY TO SECOND AS INTERVAL DAY TO SECOND(0)) AS no_fraction,
+    CAST(INTERVAL '-1 02:03:04' DAY TO SECOND AS INTERVAL DAY TO SECOND(0)) AS negative_no_fraction
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        try:
+            await cur.execute(query)
+        except TrinoUserError as e:
+            pytest.skip(f"the server does not support parametric interval types: {e.message}")
+        result = await cur.fetch_arrow_table()
+
+    assert result.schema.field("no_fraction").type == pa.duration("us")
+    assert result.to_pydict() == {
+        "no_fraction": [timedelta(days=1, hours=2, minutes=3, seconds=4)],
+        "negative_no_fraction": [-timedelta(days=1, hours=2, minutes=3, seconds=4)],
+    }
+
+    # the row cursor decodes the same values
+    async with await trino_connection_with_arrow.cursor() as cur:
+        await cur.execute(query)
+        assert await cur.fetchall() == [[
+            timedelta(days=1, hours=2, minutes=3, seconds=4),
+            -timedelta(days=1, hours=2, minutes=3, seconds=4),
+        ]]
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_negative_intervals(trino_connection_with_arrow: Connection):
+    query = """
+    SELECT
+    -INTERVAL '1 02:03:04.567' DAY TO SECOND AS negative_day_to_second,
+    -INTERVAL '0.5' SECOND AS negative_half_second,
+    -INTERVAL '1-2' YEAR TO MONTH AS negative_year_to_month
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetch_arrow_table()
+
+    assert result.schema.field("negative_day_to_second").type == pa.duration("us")
+    assert result.schema.field("negative_year_to_month").type == pa.month_day_nano_interval()
+    assert result.column("negative_day_to_second").to_pylist() == [
+        -timedelta(days=1, hours=2, minutes=3, seconds=4, milliseconds=567)
+    ]
+    assert result.column("negative_half_second").to_pylist() == [-timedelta(milliseconds=500)]
+    assert result.column("negative_year_to_month").to_pylist() == [pa.MonthDayNano([-14, 0, 0])]
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_year_to_month_interval(trino_connection_with_arrow: Connection):
+    """INTERVAL YEAR TO MONTH is a month_day_nano_interval with the months set (days and nanoseconds are 0).
+
+    Servers which still send month_interval (unreadable by pyarrow) are converted to month_day_nano_interval by
+    aiotrino."""
+    query = """
+    SELECT
+    INTERVAL '1-2' YEAR TO MONTH AS one_year_two_months,
+    INTERVAL '3' MONTH AS three_months,
+    INTERVAL '5' YEAR AS five_years,
+    CAST(NULL AS INTERVAL YEAR TO MONTH) AS null_interval
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetch_arrow_table()
+
+    for field in result.schema:
+        assert field.type == pa.month_day_nano_interval(), field.name
+    assert result.to_pylist() == [{
+        "one_year_two_months": pa.MonthDayNano([14, 0, 0]),
+        "three_months": pa.MonthDayNano([3, 0, 0]),
+        "five_years": pa.MonthDayNano([60, 0, 0]),
+        "null_interval": None,
+    }]
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_nested_interval_and_json(trino_connection_with_arrow: Connection):
+    query = """
+    SELECT
+    ARRAY[INTERVAL '1' DAY, NULL] AS interval_array,
+    MAP(ARRAY['a'], ARRAY[INTERVAL '2' HOUR]) AS interval_map,
+    CAST(ROW(INTERVAL '1-2' YEAR TO MONTH, JSON '{"a":1}') AS ROW(ym INTERVAL YEAR TO MONTH, j JSON)) AS row_value,
+    ARRAY[JSON '[1,2]', NULL] AS json_array,
+    MAP(ARRAY[1], ARRAY[JSON '"x"']) AS json_map
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetch_arrow_table()
+
+    assert result.schema.field("interval_array").type == pa.list_(pa.field("element", pa.duration("us")))
+    assert result.schema.field("interval_map").type == pa.map_(pa.string(), pa.duration("us"))
+    assert result.schema.field("row_value").type == pa.struct(
+        [("ym", pa.month_day_nano_interval()), ("j", pa.string())]
+    )
+    assert result.schema.field("json_array").type == pa.list_(pa.field("element", pa.string()))
+    assert result.schema.field("json_map").type == pa.map_(pa.int32(), pa.string())
+    assert result.to_pylist() == [{
+        "interval_array": [timedelta(days=1), None],
+        "interval_map": [("a", timedelta(hours=2))],
+        "row_value": {"ym": pa.MonthDayNano([14, 0, 0]), "j": '{"a":1}'},
+        "json_array": ["[1,2]", None],
+        "json_map": [(1, '"x"')],
+    }]
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_empty_result(trino_connection_with_arrow: Connection):
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute("SELECT * FROM tpch.tiny.nation WHERE false")
+        result = await cur.fetch_arrow_table()
+        assert await cur.fetchone_arrow() is None
+
+    assert isinstance(result, pa.Table)
+    assert result.num_rows == 0
+    assert result.schema == pa.schema([
+        ("nationkey", pa.int64()),
+        ("name", pa.string()),
+        ("regionkey", pa.int64()),
+        ("comment", pa.string()),
+    ])
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_map_type(trino_connection_with_arrow: Connection):
+    query = """
+    SELECT
+    MAP(ARRAY['a', 'b'], ARRAY[1, NULL]) AS map_val,
+    CAST(NULL AS MAP(VARCHAR, INTEGER)) AS null_map
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetch_arrow_table()
+
+    map_type = result.schema.field("map_val").type
+    assert map_type == pa.map_(pa.string(), pa.int32())
+    assert map_type.key_field.nullable is False
+    assert map_type.item_field.nullable is True
+    assert result.to_pydict() == {"map_val": [[("a", 1), ("b", None)]], "null_map": [None]}
+    # the entries of a map are never null
+    assert result.column("map_val").combine_chunks().flatten().null_count == 0
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_arrow_time_with_time_zone(trino_connection_with_arrow: Connection):
+    """Arrow has no time with time zone type: the values are normalized to UTC and the offset is lost."""
+    query = """
+    SELECT
+    TIME '14:30:45+05:30' AS time_tz_0,
+    TIME '14:30:45.123+05:30' AS time_tz_3,
+    TIME '14:30:45.123456-02:00' AS time_tz_6,
+    TIME '01:30:45.123456789+05:30' AS time_tz_9
+    """
+    async with await trino_connection_with_arrow.cursor('segment') as cur:
+        await cur.execute(query)
+        result = await cur.fetch_arrow_table()
+
+    assert result.schema.field("time_tz_0").type == pa.time32("s")
+    assert result.schema.field("time_tz_3").type == pa.time32("ms")
+    assert result.schema.field("time_tz_6").type == pa.time64("us")
+    assert result.schema.field("time_tz_9").type == pa.time64("ns")
+    assert result.column("time_tz_0").to_pylist() == [time(9, 0, 45)]
+    assert result.column("time_tz_3").to_pylist() == [time(9, 0, 45, 123000)]
+    assert result.column("time_tz_6").to_pylist() == [time(16, 30, 45, 123456)]
+    # 01:30 +05:30 is 20:00 UTC the day before
+    assert result.column("time_tz_9").cast(pa.int64()).to_pylist() == [(20 * 3600 + 45) * 10**9 + 123456789]
+
+
+@pytest.mark.skipif(
+    not ARROW_SPOOLING_SUPPORTED,
+    reason="Arrow spooling is not supported"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_row_cursor_with_arrow_encoding(trino_connection_with_arrow: Connection, run_trino):
+    """The row cursor decodes Arrow segments to the same values as the JSON encodings (except the time zone of
+    TIME/TIMESTAMP WITH TIME ZONE values, returned in UTC)."""
+    query = """
+    SELECT
+    1 AS i, REAL '1.1' AS r, DECIMAL '12.30' AS d, 'x' AS s, X'0102' AS b, DATE '2024-01-02' AS dt,
+    TIMESTAMP '2024-01-02 03:04:05.123456789' AS ts9, INTERVAL '1 02:03:04.567' DAY TO SECOND AS ds,
+    INTERVAL '1-2' YEAR TO MONTH AS ym, UUID '12151fd2-7586-11e9-8f9e-2a86e4085a59' AS u,
+    ARRAY[1, NULL] AS a, MAP(ARRAY['k'], ARRAY[ROW(1, 'v')]) AS m, JSON '{"a":1}' AS j
+    """
+    host, port = run_trino
+    json_connection = aiotrino.dbapi.Connection(host=host, port=port, user="test", source="test", max_attempts=1,
+                                                encoding="json")
     try:
-        result.to_pydict()
-        assert False, "Expected to_pydict() to fail for interval types"
-    except KeyError:
-        pass  # Expected - PyArrow cannot convert interval types
+        async with await json_connection.cursor() as cur:
+            await cur.execute(query)
+            expected = await cur.fetchall()
+    finally:
+        await json_connection.close()
+
+    async with await trino_connection_with_arrow.cursor() as cur:
+        await cur.execute(query)
+        rows = await cur.fetchall()
+    assert rows == expected
+
+
+@pytest.mark.skipif(
+    trino_version() <= 466,
+    reason="spooling protocol was introduced in version 466"
+)
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
+async def test_fetchall_arrow_with_json_encoding(trino_connection: Connection):
+    """With a JSON encoding (or a server without Arrow support), the Arrow methods convert the rows to Arrow."""
+    if trino_connection._client_session.encoding is None:
+        pytest.skip("SegmentCursor requires an encoding")
+    async with await trino_connection.cursor("segment") as cur:
+        await cur.execute("SELECT nationkey, name, CAST(nationkey AS DECIMAL(10, 2)) AS d FROM tpch.tiny.nation")
+        result = await cur.fetch_arrow_table()
+    assert result.num_rows == 25
+    assert result.schema == pa.schema([("nationkey", pa.int64()), ("name", pa.string()), ("d", pa.decimal128(10, 2))])
+    assert sorted(result.column("nationkey").to_pylist()) == list(range(25))
 
 
 @pytest.mark.skipif(
@@ -2302,7 +2554,7 @@ async def test_arrow_array_type(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.list_(pa.int32())
     
@@ -2324,7 +2576,7 @@ async def test_arrow_row_type(trino_connection_with_arrow: Connection):
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     assert result.schema[0].type == pa.struct([("field0", pa.string()), ("field1", pa.int32())])
     
@@ -2366,7 +2618,7 @@ async def test_arrow_complex_nested_timestamps(trino_connection_with_arrow: Conn
     """
     async with await trino_connection_with_arrow.cursor('segment') as cur:
         await cur.execute(query)
-        result = await cur.fetchall_arrow()
+        result = await cur.fetch_arrow_table()
     
     # Verify schema has nanosecond precision timestamps
     expected_schema = pa.struct([

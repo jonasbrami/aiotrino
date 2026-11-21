@@ -11,8 +11,12 @@ a distributed SQL engine. It supports Python 3.11, 3.12 and 3.13.
 
 # Installation
 
+This fork is not published on PyPI: `pip install aiotrino` installs the upstream
+[mvanderlee/aiotrino](https://github.com/mvanderlee/aiotrino) package, which has no Arrow support.
+Install the fork from GitHub, with the `arrow` extra (pyarrow >= 18) to use the Arrow interface:
+
 ```
-$ pip install aiotrino
+$ pip install "aiotrino[arrow] @ git+https://github.com/jonasbrami/aiotrino.git"
 ```
 
 # Quick Start
@@ -52,15 +56,9 @@ This will query the `system.runtime.nodes` system tables that shows the nodes
 in the Trino cluster.
 
 The DBAPI implementation in `aiotrino.dbapi` provides methods to retrieve fewer
-rows for example `Cursorfetchone()` or `Cursor.fetchmany()`. By default
+rows for example `Cursor.fetchone()` or `Cursor.fetchmany()`. By default
 `Cursor.fetchmany()` fetches one row. Please set
-`trino.dbapi.Cursor.arraysize` accordingly.
-
-For backwards compatibility with PrestoSQL, override the headers at the start of your application
-```python
-import aiotrino
-aiotrino.constants.HEADERS = aiotrino.constants.PrestoHeaders
-```
+`aiotrino.dbapi.Cursor.arraysize` accordingly.
 
 ## Arrow Interface for High-Performance Data Fetching
 
@@ -97,7 +95,7 @@ async def fetch_everything_in_memory():
         async with cursor as cur:
             await cur.execute(query)
             # Fetch all the query output as Arrow table
-            arrow_table = await cur.fetchall_arrow()
+            arrow_table = await cur.fetch_arrow_table()
             print(f"Fetched {len(arrow_table)} rows")
             return arrow_table
 
@@ -125,17 +123,104 @@ async def stream_segment_per_segment():
             await cur.execute(query)
             # Fetch single segment as an arrow table
             # Allows to stream query result to client
-            while arrow_table_segment := await cur.fetchone_arrow()
+            while (arrow_table_segment := await cur.fetchone_arrow()) is not None:
                 process(arrow_table_segment)
 
 result = asyncio.run(stream_segment_per_segment())
 ```
+
+### Stream record batches
+
+`fetch_record_batches()` streams the result as `pyarrow.RecordBatch` objects, in order, with a bounded number of
+segments downloaded and decoded ahead (`prefetch`):
+
+```python
+async with aiotrino.dbapi.connect(host="your-trino-host", port=8080, user="your-username",
+                                  encoding="arrow+zstd") as conn:
+    async with await conn.cursor(cursor_style="segment") as cur:
+        await cur.execute(query)
+        async for batch in cur.fetch_record_batches(prefetch=4):
+            process(batch)
+```
+
+### ADBC-style API
+
+The cursors mirror the [ADBC Python DB-API](https://arrow.apache.org/adbc/current/python/api/adbc_driver_manager.html)
+(`adbc_driver_manager.dbapi`) with coroutines:
+
+| Method | Description |
+|---|---|
+| `await cur.fetch_arrow_table()` (alias `fetchallarrow()`) | the rest of the result as a `pyarrow.Table` (`fetchall_arrow()` is a deprecated alias) |
+| `async for batch in cur.fetch_record_batches(prefetch=N)` | the rest of the result as `pyarrow.RecordBatch` objects |
+| `await cur.fetch_df(arrow_dtypes=False)` | a pandas DataFrame (TIME(9)/TIME(12) columns use `pandas.ArrowDtype`) |
+| `await cur.fetch_polars()` | a polars DataFrame (INTERVAL YEAR TO MONTH as a number of months) |
+| `cur.description` | PEP 249 description from the columns received by `execute()` (`await cur.get_description()` still works) |
+| `cur.arrow_schema` | the Arrow schema of the result |
+| `cur.rownumber` | number of rows fetched from the current result |
+| `await cur.adbc_cancel()` | cancel the query |
+| `await conn.adbc_get_info()` | vendor name/version (from `/v1/info`), driver name/version, pyarrow version |
+| `conn.adbc_current_catalog`, `conn.adbc_current_db_schema` | catalog and schema of the session (follow `USE`, can be set) |
+
+The segment cursor (`cursor("segment")`) receives the Arrow segments as is; the row cursor (`cursor()`) converts its
+rows to Arrow. Unlike ADBC, the `type_code` of `description` is the Trino type (a `str`, so the DB-API type objects
+such as `aiotrino.dbapi.NUMBER` keep working); its `arrow_type` attribute gives the Arrow type. The Arrow schemas
+built by aiotrino (`arrow_schema`, empty results, JSON results converted to Arrow) carry the Trino type of each column
+in the `trino.type` field metadata.
+
 ### Features
 
 - **Arrow Encoding**: In-memory columnar data format, support for 'arrow', 'arrow+zstd' encoding
-- **Flexible Fetching**: Use `fetchall_arrow()` for resultset that can fit in memory or use `fetchone_arrow()` for streaming result to client.
+- **Flexible Fetching**: Use `fetch_arrow_table()` (formerly `fetchall_arrow()`, still available as a deprecated alias) for resultset that can fit in memory or use `fetchone_arrow()` for streaming result to client.
 - **Async**: Asynchronous segment retrieval and parallel deserialization
 - **Easy Integration**: Zero copy, (almost) zero deserialization overhead
+
+`fetch_arrow_table()` always returns a `pyarrow.Table`: an empty result is an empty table with the schema of the result,
+and when the server does not send Arrow (server without spooling or without the Arrow encodings, JSON encoding
+chosen by the server) the rows are converted to Arrow with the same schema as the server's Arrow encoding.
+`fetchone_arrow()` returns the next segment as a table, `None` at the end of the result.
+
+Segments are downloaded concurrently (`TRINO_MAX_PARALLEL_SEGMENT_RETRIEVAL` segments for `fetch_arrow_table()`,
+`TRINO_SEGMENT_PREFETCH` ahead for `fetchone_arrow()` and the row cursor), decoded in worker threads and acknowledged
+once decoded. Segments are downloaded without the credentials and headers sent to the coordinator. While the result
+is being read, heartbeats keep the query alive (`heartbeat_interval` connection argument, 30 seconds by default).
+
+The row cursor (`cursor()`) can also be used with the Arrow encodings: the segments are converted to the same Python
+values as with the JSON encodings (see below).
+
+### Arrow vs JSON results
+
+The server encodes the Trino types as follows. Values returned by `table.to_pylist()` (pyarrow) can differ from the
+values returned by the row cursor:
+
+| Trino type | Arrow type | `to_pylist()` | Row cursor (JSON encodings) | Row cursor (Arrow encodings) |
+|---|---|---|---|---|
+| BOOLEAN, TINYINT, SMALLINT, INTEGER, BIGINT, REAL, DOUBLE | bool, int8, int16, int32, int64, float, double | `bool`, `int`, `float` | same | same |
+| DECIMAL(p, s) | decimal128(p, s) | `Decimal` | `Decimal` | `Decimal` |
+| VARCHAR, CHAR(n), JSON | string (CHAR values padded) | `str` | `str` | `str` |
+| VARBINARY | binary | `bytes` | `bytes` | `bytes` |
+| DATE | date32 | `date` | `date` | `date` |
+| TIME(p) | time32[s/ms], time64[us/ns] | `time` | `time` (µs) | `time` (nanoseconds rounded to µs) |
+| TIME(p) WITH TIME ZONE | time32/time64 **normalized to UTC, offset lost** (Arrow has no such type) | `time` (UTC, naive) | `time` with the original offset | `time` in UTC (`tzinfo=UTC`) |
+| TIMESTAMP(p) | timestamp[s/ms/us/ns] | `datetime` (ns units need pandas: `pandas.Timestamp`) | `datetime` (µs) | `datetime` (µs) |
+| TIMESTAMP(p) WITH TIME ZONE | timestamp[unit, tz=UTC]: **same instant, time zone lost** | `datetime` in UTC | `datetime` in the original time zone | `datetime` in UTC |
+| INTERVAL DAY TO SECOND | duration[us] | `timedelta` | `timedelta` | `timedelta` |
+| INTERVAL YEAR TO MONTH | month_day_nano_interval (months only) | `MonthDayNano(months, 0, 0)` | `relativedelta` | `relativedelta` |
+| UUID | arrow.uuid extension (fixed_size_binary(16)) | `uuid.UUID` | `uuid.UUID` | `uuid.UUID` |
+| ARRAY(T) | list<element: T> | `list` | `list` | `list` |
+| MAP(K, V) | map<K, V> | list of `(key, value)` tuples (`to_pylist(maps_as_pydicts="strict")` for dicts, pyarrow >= 19) | `dict` | `dict` |
+| ROW(...) | struct, anonymous fields named `field0`, `field1`, ... | `dict` | `NamedRowTuple` | `NamedRowTuple` |
+| HyperLogLog | binary | `bytes` | base64 `str` | base64 `str` |
+| UNKNOWN (`NULL` literal) | null | `None` | `None` | `None` |
+
+Other types (IPADDRESS, Geometry, P4HyperLogLog, QDigest, TDigest, SetDigest, ...) cannot be encoded as Arrow by the
+server: the query fails with an Arrow encoding. With a JSON encoding, `fetch_arrow_table()` converts them to strings (or
+binary for the sketches). Servers which send INTERVAL YEAR TO MONTH as `month_interval` (unreadable by pyarrow) are
+converted to `month_day_nano_interval` by aiotrino.
+
+pandas: `table.to_pandas()` fails on TIME(9)/TIME(12) values with sub-microsecond digits ("Value ... has non-zero
+nanoseconds"), use `table.to_pandas(types_mapper=pandas.ArrowDtype)` to keep the Arrow types, or `cursor.fetch_df()`
+which does it for those columns. polars cannot import `month_day_nano_interval`: `cursor.fetch_polars()` converts
+INTERVAL YEAR TO MONTH values to their number of months.
 
 ### Performance Bottlenecks Explained
 
@@ -281,7 +366,7 @@ Type `./run tests` to run both unit and integration tests.
 only unit tests, type:
 
 ```
-$ pytest tests
+$ pytest tests/unit
 ```
 
 Then you can pass options like `--pdb` or anything supported by `pytest --help`.
@@ -296,7 +381,7 @@ $ tox
 To run integration tests:
 
 ```
-$ pytest integration_tests
+$ pytest tests/integration
 ```
 
 They pull a Docker image and then run a container with a Trino server:
@@ -347,7 +432,7 @@ Supported OS Ubuntu 22.04
 ## Releasing
 
 - [Set up your development environment](#Getting-Started-With-Development).
-- Change version in `aiotrino/__init__.py`.
+- Change version in `aiotrino/_version.py`.
 - Commit and create an annotated tag (`git tag -m '' current_version`)
 - Run the following:
   ```bash

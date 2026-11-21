@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import io
 import json
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -74,6 +75,7 @@ class FakeTrino:
         self.segments: dict[str, Segment] = {}
         self.requests: list[Recorded] = []
         self.attempts: dict[tuple[str, str], int] = {}  # number of requests of each page and segment
+        self.downloading = self.max_downloading = 0
         self._deleted: set[str] = set()  # like the server, an acknowledged segment is deleted
 
     def add_page(self, **kwargs) -> Page:
@@ -210,7 +212,12 @@ class FakeTrino:
             # S3 rejects presigned URLs combined with another authentication mechanism
             return web.Response(status=400, text="Only one auth mechanism allowed")
         attempt = self._attempt("segment", segment.id)
-        await asyncio.sleep(segment.delay)
+        self.downloading += 1
+        self.max_downloading = max(self.max_downloading, self.downloading)
+        try:
+            await asyncio.sleep(segment.delay)
+        finally:
+            self.downloading -= 1
         if segment.fail_status is not None and (segment.fail_times is None or attempt < segment.fail_times):
             return web.Response(status=segment.fail_status, text="storage error")
         if attempt < segment.reset_times:
@@ -244,3 +251,20 @@ def json_segment(start: int, count: int, compression: Optional[str] = None, **kw
         return Segment(lz4.block.compress(raw, store_size=False), count, uncompressed_size=len(raw), **kwargs)
     return Segment(raw, count, **kwargs)
 
+
+def arrow_table(start: int, count: int):
+    """The rows of :func:`json_rows` as an Arrow table."""
+    import pyarrow as pa
+
+    values = range(start, start + count)
+    return pa.table({"a": pa.array(values, pa.int64()), "s": pa.array([f"v{i}" for i in values], pa.string())})
+
+
+def arrow_segment(start: int, count: int, compression: Optional[str] = None, max_chunksize=None, **kwargs) -> Segment:
+    import pyarrow.ipc as ipc
+
+    sink = io.BytesIO()
+    table = arrow_table(start, count)
+    with ipc.new_stream(sink, table.schema, options=ipc.IpcWriteOptions(compression=compression)) as writer:
+        writer.write_table(table, max_chunksize=max_chunksize)
+    return Segment(sink.getvalue(), count, **kwargs)

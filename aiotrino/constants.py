@@ -80,5 +80,7 @@ SCALE_TYPES = ["decimal"]
 
 # Number of spooled segments downloaded and decoded ahead (including the one being read) when iterating over rows
 DEFAULT_SEGMENT_PREFETCH = int(os.environ.get("TRINO_SEGMENT_PREFETCH", 2))
+# Maximum number of spooled segments downloaded concurrently by SegmentCursor.fetch_arrow_table()
 MAX_PARALLEL_SEGMENT_RETRIEVAL = int(os.environ.get("TRINO_MAX_PARALLEL_SEGMENT_RETRIEVAL", 100))
+# Deprecated, unused: segments are decoded with asyncio.to_thread() (the default executor of the event loop)
 ARROW_THREAD_POOL_SIZE = int(os.environ.get("TRINO_ARROW_THREAD_POOL_SIZE", 20))

@@ -71,7 +71,7 @@ async def bench_arrow_zstd(query: str) -> tuple[int, float]:
     async with await conn.cursor(cursor_style="segment") as cur:
         t0 = time.perf_counter()
         await cur.execute(query)
-        table = await cur.fetchall_arrow()
+        table = await cur.fetch_arrow_table()
         elapsed = time.perf_counter() - t0
     await conn.close()
     return len(table), elapsed

@@ -1848,6 +1848,9 @@ class CompressedQueryDataDecoderFactory:
             return Lz4QueryDataDecoder(JsonQueryDataDecoder(self._mapper))
         elif encoding == "json":
             return JsonQueryDataDecoder(self._mapper)
+        elif encoding in ("arrow", "arrow+zstd"):
+            # zstd buffer compression is part of the Arrow IPC format, handled by pyarrow
+            return ArrowQueryDataDecoder(self._mapper)
         else:
             raise ValueError(f"Unsupported encoding: {encoding}")
 
@@ -1864,6 +1867,30 @@ class JsonQueryDataDecoder(QueryDataDecoder):
 
     def decode(self, data: bytes, metadata: dict[str, Any]) -> list[list[Any]]:
         return self._mapper.map(_json_loads(data))
+
+
+class ArrowQueryDataDecoder(QueryDataDecoder):
+    """Decodes Arrow segments (``arrow``, ``arrow+zstd`` encodings) to rows of the same Python values as the JSON
+    encodings (see :func:`aiotrino.arrow.table_to_rows`). Requires pyarrow."""
+
+    def __init__(self, mapper: RowMapper) -> None:
+        type_signatures = getattr(mapper, "type_signatures", None)
+        if type_signatures is None:
+            raise exceptions.NotSupportedError(
+                "Arrow encodings cannot be decoded to rows with legacy_primitive_types=True, use a JSON encoding"
+            )
+        import aiotrino.arrow
+
+        aiotrino.arrow.require_pyarrow()
+        self._type_signatures = type_signatures
+
+    def decode(self, data: bytes, metadata: _SegmentMetadataTO) -> list[list[Any]]:
+        import pyarrow as pa
+
+        import aiotrino.arrow
+
+        schema, batches = aiotrino.arrow.read_ipc_stream(data)
+        return aiotrino.arrow.table_to_rows(pa.Table.from_batches(batches, schema=schema), self._type_signatures)
 
 
 class CompressedQueryDataDecoder(QueryDataDecoder):

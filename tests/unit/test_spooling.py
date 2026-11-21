@@ -122,8 +122,10 @@ def test_unavailable_codecs_are_not_requested(monkeypatch):
         aiotrino.client.CompressedQueryDataDecoderFactory(None).create("json+zstd")
 
 
-@pytest.mark.parametrize("compression", ["zstd", "lz4"])
-async def test_compressed_segments_are_decoded_in_worker_threads(monkeypatch, compression):
+@pytest.mark.parametrize("cursor_style, compression", [("row", "zstd"), ("row", "lz4"), ("segment", "zstd")])
+async def test_compressed_segments_are_decoded_in_worker_threads(monkeypatch, cursor_style, compression):
+    if cursor_style == "segment":
+        pytest.importorskip("pyarrow")
     threads = []
     decode = aiotrino.client.JsonQueryDataDecoder.decode
     monkeypatch.setattr(aiotrino.client.JsonQueryDataDecoder, "decode",
@@ -132,9 +134,12 @@ async def test_compressed_segments_are_decoded_in_worker_threads(monkeypatch, co
     async with FakeTrino() as trino:
         segments = [json_segment(0, 2, compression), json_segment(2, 2, compression, inline=True)]
         trino.add_page(columns=COLUMNS, segments=segments, encoding=encoding)
-        async with trino.cursor(encoding=encoding) as cur:
+        async with trino.cursor(cursor_style, encoding=encoding) as cur:
             await cur.execute("SELECT 1")
-            assert await cur.fetchall() == json_rows(0, 4)
+            if cursor_style == "segment":
+                assert (await cur.fetch_arrow_table()).num_rows == 4
+            else:
+                assert await cur.fetchall() == json_rows(0, 4)
         assert trino.acks == ["0"]
     assert len(threads) == 2
     assert threading.main_thread() not in threads

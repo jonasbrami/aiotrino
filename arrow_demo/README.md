@@ -94,11 +94,11 @@ With Arrow encoding, this architecture really shines. Each spooled segment is a 
 
 ![Spooling Protocol Sequence Diagram](images/spooling_protocol.png)
 
-In `aiotrino`, the `fetchall_arrow()` method implements a fully pipelined retrieval loop. It keeps awaiting the next segment URI from the Trino coordinator, and as soon as one arrives, it immediately fires off a concurrent task — no waiting for the previous one to finish. Each task downloads the segment data (async HTTP, bounded by a semaphore to limit concurrency) and then hands the raw bytes to a thread pool of Arrow workers for deserialization. Because PyArrow releases the GIL, these threads achieve true parallelism.
+In `aiotrino`, the `fetch_arrow_table()` method (formerly `fetchall_arrow()`) implements a fully pipelined retrieval loop. It keeps awaiting the next segment URI from the Trino coordinator, and as soon as one arrives, it immediately fires off a concurrent task — no waiting for the previous one to finish. Each task downloads the segment data (async HTTP, with a bounded number of segments in flight) and then hands the raw bytes to worker threads (`asyncio.to_thread`) for deserialization. Because PyArrow releases the GIL, these threads achieve true parallelism.
 
 The result is a three-stage pipeline where coordinator polling, HTTP downloads, and Arrow deserialization all overlap:
 
-![fetchall_arrow() Pipelined Segment Retrieval](images/pipeline_gantt.png)
+![fetch_arrow_table() Pipelined Segment Retrieval](images/pipeline_gantt.png)
 
 Each row is a segment. The staggered bars show that while segment 1 is downloading, segment 2's URI is already being polled. While segment 1 is deserializing, segments 2 and 3 are downloading. Nothing blocks — the entire pipeline runs concurrently.
 
@@ -122,7 +122,7 @@ conn = aiotrino.dbapi.Connection(
 
 async with await conn.cursor(cursor_style="segment") as cur:
     await cur.execute("SELECT * FROM iceberg.my_schema.my_table")
-    arrow_table = await cur.fetchall_arrow()
+    arrow_table = await cur.fetch_arrow_table()
 
 # Zero-copy to Pandas or Polars
 df = arrow_table.to_pandas()

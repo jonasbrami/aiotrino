@@ -43,7 +43,7 @@ async def run_benchmark():
         await cur.execute(args.query)
         
         if args.encoding.startswith("arrow"):
-            data = await cur.fetchall_arrow()
+            data = await cur.fetch_arrow_table()
         else:
             data = await cur.fetchall()
         actual_rows = len(data)

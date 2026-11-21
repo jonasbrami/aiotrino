@@ -295,7 +295,10 @@ class RowMapperFactory:
         assert columns is not None
 
         if not legacy_primitive_types:
-            return RowMapper([self._create_value_mapper(column["typeSignature"]) for column in columns])
+            return RowMapper(
+                [self._create_value_mapper(column["typeSignature"]) for column in columns],
+                type_signatures=[column["typeSignature"] for column in columns],
+            )
         return RowMapperFactory.NO_OP_ROW_MAPPER
 
     def _create_value_mapper(self, column: Dict[str, Any]) -> ValueMapper[Any]:
@@ -366,8 +369,10 @@ class RowMapper:
     Maps a row of data given a list of mapping functions
     """
 
-    def __init__(self, columns: List[ValueMapper[Any]]):
+    def __init__(self, columns: List[ValueMapper[Any]], type_signatures: Optional[List[Dict[str, Any]]] = None):
         self.columns = columns
+        # type signatures of the columns, used to map the values of Arrow segments
+        self.type_signatures = type_signatures
 
     def map(self, rows: List[List[Any]]) -> List[List[Any]]:
         if len(self.columns) == 0:

@@ -48,7 +48,7 @@ async def main(source: str):
         await cur.execute(query)
 
         # Fetch entire result as a single PyArrow Table
-        arrow_table = await cur.fetchall_arrow()
+        arrow_table = await cur.fetch_arrow_table()
 
         print(f"--- Result ---")
         print(f"Rows:    {len(arrow_table):,}")
