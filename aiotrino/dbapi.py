@@ -23,13 +23,12 @@ import asyncio
 import datetime
 import math
 import uuid
-import warnings
 import weakref
 from collections import OrderedDict, deque
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from threading import Lock
 from time import time
-from collections.abc import AsyncIterator
 from typing import Any, NamedTuple, Optional, Union
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -37,11 +36,11 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from aioitertools import islice as aio_islice
 
+import aiotrino.arrow  # importable without pyarrow, its functions raise an ImportError explaining how to install it
 import aiotrino.client
 import aiotrino.exceptions
 import aiotrino.logging
 from aiotrino import constants
-from aiotrino.mapper import NoOpRowMapper, RowMapperFactory
 from aiotrino.exceptions import (
     DatabaseError,
     DataError,
@@ -54,14 +53,13 @@ from aiotrino.exceptions import (
     ProgrammingError,
     Warning,
 )
+from aiotrino.mapper import NoOpRowMapper, RowMapperFactory
 from aiotrino.transaction import NO_TRANSACTION, IsolationLevel, Transaction
 from aiotrino.utils import aiter, anext
 
 # Optional pyarrow import
 try:
     import pyarrow as pa
-
-    import aiotrino.arrow
 
     PYARROW_AVAILABLE = True
 except ImportError:
@@ -153,6 +151,8 @@ def connect(*args, **kwargs):
 
 
 _USE_DEFAULT_ENCODING = object()
+# seconds Connection.close() waits for the segment acknowledgements in progress
+_ACKNOWLEDGEMENTS_CLOSE_TIMEOUT = 10
 
 
 class Connection(object):
@@ -263,17 +263,19 @@ class Connection(object):
             await self.commit()
         except Exception:
             await self.rollback()
-        else:
+        finally:
             await self.close()
 
     async def close(self):
         """Close the HTTP session created by this connection. A session passed by the caller is not closed."""
         # TODO cancel outstanding queries?
         self._closed = True
+        if self._segment_http_session is not None and not self._segment_http_session.closed:
+            # segments are acknowledged in the background
+            await aiotrino.client.wait_for_acknowledgements(timeout=_ACKNOWLEDGEMENTS_CLOSE_TIMEOUT)
+            await self._segment_http_session.close()
         if self._owns_http_session and self._http_session is not None and not self._http_session.closed:
             await self._http_session.close()
-        if self._segment_http_session is not None and not self._segment_http_session.closed:
-            await self._segment_http_session.close()
 
     async def start_transaction(self):
         self._transaction = Transaction(self._create_request())
@@ -504,6 +506,9 @@ class Cursor(object):
         self._legacy_primitive_types = legacy_primitive_types
         # number of rows fetched from the current result
         self._rownumber: Optional[int] = None
+        # rows and record batches fetched by the Arrow methods of the row cursor but not delivered yet
+        self._arrow_rows: list[Any] = []
+        self._arrow_batches: list[Any] = []
 
     def __aiter__(self):
         return self._iterator
@@ -737,8 +742,17 @@ class Cursor(object):
     def _generate_unique_statement_name(self) -> str:
         return "st_" + uuid.uuid4().hex.replace("-", "")
 
-    async def execute(self, operation, params=None):
+    async def _release_previous_result(self) -> None:
+        # a failed execute() must not leave the iterator of the previous query in place
+        self._iterator = None
         self._rownumber = 0
+        self._arrow_rows = []
+        self._arrow_batches = []
+        if self._query is not None:
+            await self._query.aclose()
+
+    async def execute(self, operation, params=None):
+        await self._release_previous_result()
         if params:
             if not isinstance(params, (list, tuple)):
                 raise ProgrammingError("params must be a list or tuple containing the query parameter values")
@@ -921,11 +935,19 @@ class Cursor(object):
         """
         aiotrino.arrow.require_pyarrow()
         schema = await self._arrow_schema()
-        batches = [batch async for batch in self._row_record_batches(schema)]
+        batches = []
+        try:
+            async for batch in self._row_record_batches(schema):
+                batches.append(batch)
+        except BaseException:
+            # nothing is delivered: a retry returns these rows too
+            self._arrow_batches[0:0] = batches
+            raise
         return pa.Table.from_batches(batches, schema=schema)
 
     async def _row_record_batches(self, schema: "pa.Schema"):
-        """The remaining rows of the result as record batches."""
+        """The remaining rows of the result as record batches. The rows fetched but not delivered as a batch yet are
+        kept on the cursor, so that an error or a cancellation does not lose them."""
         columns = self._query.columns
         mapper = None
         if isinstance(self._query._row_mapper, NoOpRowMapper) and columns:
@@ -937,14 +959,18 @@ class Cursor(object):
                 rows = mapper.map(rows)
             return aiotrino.arrow.rows_to_record_batch(rows, columns, schema)
 
-        rows: list[Any] = []
-        while (row := await self.fetchone()) is not None:
-            rows.append(row)
-            if len(rows) >= _DIRECT_PROTOCOL_ROWS_PER_TABLE:
-                batch, rows = await asyncio.to_thread(to_batch, rows), []
-                yield batch
-        if rows:
-            yield await asyncio.to_thread(to_batch, rows)
+        while True:
+            if self._arrow_batches:
+                yield self._arrow_batches.pop(0)
+                continue
+            rows = self._arrow_rows
+            while len(rows) < _DIRECT_PROTOCOL_ROWS_PER_TABLE and (row := await self.fetchone()) is not None:
+                rows.append(row)
+            if not rows:
+                return
+            batch = await asyncio.to_thread(to_batch, list(rows))
+            rows.clear()
+            yield batch
 
     async def fetch_record_batches(self, prefetch: Optional[int] = None) -> AsyncIterator["pa.RecordBatch"]:
         """Yield the rest of the result as ``pyarrow.RecordBatch`` objects, in order (ADBC's
@@ -986,11 +1012,6 @@ class Cursor(object):
         table = await self.fetch_arrow_table()
         return await asyncio.to_thread(aiotrino.arrow.table_to_polars, table)
 
-    async def fetchall_arrow(self) -> "pa.Table":
-        """Deprecated alias of :meth:`fetch_arrow_table`."""
-        warnings.warn("fetchall_arrow() is deprecated, use fetch_arrow_table()", DeprecationWarning, stacklevel=2)
-        return await self.fetch_arrow_table()
-
     async def fetchone_arrow(self) -> Optional["pa.Table"]:
         raise NotImplementedError(
             "fetchone_arrow is not implemented for this cursor type. "
@@ -1020,7 +1041,7 @@ class SegmentCursor(Cursor):
             raise ValueError("params not supported")
 
         await self._close_arrow_reader()
-        self._rownumber = 0
+        await self._release_previous_result()
         self._query = aiotrino.client.TrinoQuery(
             self._request,
             query=operation,
@@ -1068,10 +1089,17 @@ class SegmentCursor(Cursor):
         reader = self._get_arrow_reader()
         prefetch = prefetch if prefetch is not None else constants.DEFAULT_SEGMENT_PREFETCH
         try:
-            while (table := await reader.next_table(prefetch)) is not None:
-                self._rownumber = (self._rownumber or 0) + table.num_rows
-                for batch in table.to_batches():
-                    yield batch
+            while True:
+                if not reader._leftover:
+                    table = await reader.next_table(prefetch)
+                    if table is None:
+                        break
+                    # the batches not yielded yet stay in the reader: they are not lost if the caller leaves the loop
+                    reader._leftover.extend(table.to_batches())
+                    continue
+                batch = reader._leftover.popleft()
+                self._rownumber = (self._rownumber or 0) + batch.num_rows
+                yield batch
         finally:
             # An iterator left with "break" is closed later, when garbage collected: do not cancel the downloads of
             # another call reading the result in the meantime.
@@ -1087,9 +1115,14 @@ class SegmentCursor(Cursor):
         """
         reader = self._get_arrow_reader()
         tables = []
-        while (table := await reader.next_table(constants.MAX_PARALLEL_SEGMENT_RETRIEVAL)) is not None:
-            self._rownumber = (self._rownumber or 0) + table.num_rows
-            tables.append(table)
+        try:
+            while (table := await reader.next_table(constants.MAX_PARALLEL_SEGMENT_RETRIEVAL)) is not None:
+                tables.append(table)
+        except BaseException:
+            # nothing is delivered: a retry returns these rows too
+            reader.unread(tables)
+            raise
+        self._rownumber = (self._rownumber or 0) + sum(table.num_rows for table in tables)
         return await reader.concat(tables)
 
     async def close(self):
@@ -1125,6 +1158,8 @@ class _ArrowReader:
         self._keep_alive_task: Optional[asyncio.Task] = None
         # number of calls reading the result
         self._active = 0
+        # record batches taken from the result but not delivered to the caller, returned first by the next call
+        self._leftover: deque["pa.RecordBatch"] = deque()
 
     @property
     def schema(self):
@@ -1136,8 +1171,11 @@ class _ArrowReader:
 
     async def next_table(self, prefetch: int) -> Optional["pa.Table"]:
         """The rows of the next segment (or group of rows) as a table, ``None`` at the end of the result."""
-        if self._closed:
-            raise ProgrammingError("the result was closed")
+        self._check_open()
+        if self._leftover:
+            batches = list(self._leftover)
+            self._leftover.clear()
+            return pa.Table.from_batches(batches, schema=batches[0].schema)
         self._start_keep_alive()
         self._active += 1
         try:
@@ -1155,20 +1193,39 @@ class _ArrowReader:
                         table = await task
                         break
                     except asyncio.CancelledError:
+                        self._check_open()
                         if asyncio.current_task().cancelling():
                             raise
                         # the task was cancelled by someone else (e.g. a fetch_record_batches() iterator closed
                         # concurrently): load the segment again
                         if entry[1] is task:
                             entry[1] = None
+            self._check_open()
         except BaseException:
             await self.cancel_pending()
             raise
         finally:
             self._active -= 1
         self._pending.popleft()
-        await self._fill(prefetch)
+        try:
+            # start loading the next segments (this may fetch the next page from the coordinator)
+            await self._fill(prefetch)
+        except asyncio.CancelledError:
+            # do not lose this table: the next call returns it
+            self._pending.appendleft(entry)
+            raise
+        except Exception as e:  # noqa: BLE001 - raised again by the next call, which fetches the page again
+            logger.debug("prefetching the next segments failed: %s", e)
         return table
+
+    def unread(self, tables: list["pa.Table"]) -> None:
+        """Put back tables taken from the result but not delivered, they are returned first by the next call."""
+        batches = [batch for table in tables for batch in table.to_batches()]
+        self._leftover.extendleft(reversed(batches))
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise ProgrammingError("the result was closed")
 
     async def concat(self, tables: list["pa.Table"]) -> "pa.Table":
         if not tables:
@@ -1181,7 +1238,7 @@ class _ArrowReader:
 
     async def _fill(self, prefetch: int) -> None:
         """Start loading the next units until ``prefetch`` units are pending."""
-        while not self._exhausted and len(self._pending) < max(1, prefetch):
+        while not self._exhausted and not self._closed and len(self._pending) < max(1, prefetch):
             try:
                 item = await anext(self._items)
             except StopAsyncIteration:
@@ -1196,6 +1253,8 @@ class _ArrowReader:
                 self._rows.append(item)
                 if len(self._rows) >= _DIRECT_PROTOCOL_ROWS_PER_TABLE:
                     self._flush_rows()
+        if self._closed:
+            return
         for entry in self._pending:
             if entry[1] is None:
                 entry[1] = self._start(entry[0])
@@ -1293,6 +1352,7 @@ class _ArrowReader:
 
     async def aclose(self) -> None:
         self._closed = True
+        self._leftover.clear()
         tasks = [entry[1] for entry in self._pending if entry[1] is not None]
         self._pending.clear()
         for task in tasks:

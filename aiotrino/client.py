@@ -48,15 +48,14 @@ import ssl
 import threading
 import time
 import urllib.parse
-import warnings
 from abc import abstractmethod
-from collections import deque
 from asyncio import sleep
+from collections import deque
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
-from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any, Callable, Literal, Optional, TypedDict, Union, cast
 from zoneinfo import ZoneInfo
 
@@ -124,8 +123,6 @@ else:
     PROXIES = None
 
 _HEADER_EXTRA_CREDENTIAL_KEY_REGEX = re.compile(r"^\S[^\s=]*$")
-
-ROLE_PATTERN = re.compile(r"^ROLE\{(.*)\}$")
 
 # JSON encodings of the spooling protocol, in order of preference
 ENCODINGS = ["json+zstd", "json+lz4", "json"]
@@ -332,15 +329,7 @@ class ClientSession:
             roles = {"system": roles}
         formatted_roles = {}
         for catalog, role in roles.items():
-            is_legacy_role_pattern = ROLE_PATTERN.match(role) is not None
-            if role in ("NONE", "ALL") or is_legacy_role_pattern:
-                if is_legacy_role_pattern:
-                    warnings.warn(
-                        f"A role '{role}' is provided using a legacy format. "
-                        "Please remove the ROLE{} wrapping. Support for the legacy format might be "
-                        "removed in a future release.",
-                        DeprecationWarning,
-                    )
+            if role in ("NONE", "ALL"):
                 formatted_roles[catalog] = role
             else:
                 formatted_roles[catalog] = f"ROLE{{{role}}}"
@@ -397,11 +386,6 @@ def create_http_session(verify: Union[bool, str, ssl.SSLContext] = True, http_mo
         max_line_size=constants.MAX_RESPONSE_HEADER_SIZE,
         max_field_size=constants.MAX_RESPONSE_HEADER_SIZE,
     )
-
-
-# Deprecated: the connector used to override aiohttp private APIs to raise the response header size limit.
-# create_http_session() configures this through public aiohttp options instead.
-TrinoTCPConnector = aiohttp.TCPConnector
 
 
 @dataclass
@@ -971,6 +955,8 @@ class TrinoResult:
         self._rownumber = 0
         # Iterator over the batch of rows currently being served
         self._current_batch: Optional[Union[Iterator[Any], AsyncIterator[Any]]] = None
+        self._current_batch_is_sync = False
+        self._yielded_at = 0
         # Rows of the next page, fetched before serving the current batch
         self._next_rows: Optional[Union[list[Any], AsyncIterator[Any]]] = None
 
@@ -990,6 +976,11 @@ class TrinoResult:
         return self
 
     async def __anext__(self) -> Any:
+        if self._rownumber and self._rownumber % _YIELD_EVERY_ROWS == 0 and self._yielded_at != self._rownumber:
+            # iterating over rows already in memory never suspends: let other tasks run from time to time (before
+            # taking the next row, so that a cancellation here does not lose it)
+            await asyncio.sleep(0)
+            self._yielded_at = self._rownumber
         while True:
             batch = self._current_batch
             if batch is None:
@@ -1000,9 +991,10 @@ class TrinoResult:
                 # dbapi. If fetch() fails, the state is unchanged and the next call fetches the same page again.
                 self._next_rows = await self._query.fetch() if not self._query.finished else None
                 batch = self._current_batch = _iterate(self._rows)
+                self._current_batch_is_sync = isinstance(batch, Iterator)
 
             try:
-                if isinstance(batch, Iterator):
+                if self._current_batch_is_sync:
                     row = next(batch)
                 else:
                     row = await batch.__anext__()
@@ -1012,10 +1004,8 @@ class TrinoResult:
                 self._current_batch = None
                 continue
             self._rownumber += 1
+            # like the Java client, check on every row whether a heartbeat is due (slow consumers)
             self._query.heartbeat()
-            if self._rownumber % _YIELD_EVERY_ROWS == 0:
-                # iterating over rows already in memory never suspends: let other tasks run from time to time
-                await asyncio.sleep(0)
             return row
 
     async def aclose(self) -> None:
@@ -1104,6 +1094,7 @@ class TrinoQuery(object):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._heartbeat_failures = 0
         self._heartbeat_disabled = False
+        self._heartbeat_interval = request._client_session.heartbeat_interval
 
     @property
     def query_id(self) -> Optional[str]:
@@ -1166,7 +1157,7 @@ class TrinoQuery(object):
         This is the first HTTP request sent to the coordinator.
         It sets the query_id and returns a Result object used to
         track the rows returned by the query. To fetch all rows,
-        call fetch() until is_finished is true.
+        call fetch() until finished is true.
         """
         if self._cancelled:
             raise exceptions.TrinoUserError("Query has been cancelled", self.query_id)
@@ -1195,7 +1186,11 @@ class TrinoQuery(object):
             if isinstance(new_rows, list):
                 self._result.rows += new_rows
             else:
-                first_row = await _first_row(new_rows)
+                try:
+                    first_row = await _first_row(new_rows)
+                except BaseException:
+                    await _aclose_rows(new_rows)
+                    raise
                 if first_row is not _NO_ROW:
                     self._result.rows = _ChainedRows([first_row], new_rows)
 
@@ -1272,6 +1267,8 @@ class TrinoQuery(object):
                         self._request.unauthenticated(),
                         coordinator_host=self._request._host,
                         custom_headers=dict(self._request._client_session.headers),
+                        coordinator_port=self._request._port,
+                        coordinator_scheme=self._request._http_scheme,
                     )
                 )
             else:
@@ -1298,7 +1295,7 @@ class TrinoQuery(object):
 
     @property
     def heartbeat_interval(self) -> Optional[float]:
-        return self._request._client_session.heartbeat_interval
+        return self._heartbeat_interval
 
     def heartbeat(self) -> None:
         """Send a heartbeat (``HEAD nextUri``) in the background if the coordinator did not hear from the client for
@@ -1308,13 +1305,15 @@ class TrinoQuery(object):
         Like the Java client, heartbeats are disabled after 3 consecutive failures or if the server does not support
         them.
         """
-        interval = self.heartbeat_interval
+        interval = self._heartbeat_interval
         if not interval or self._heartbeat_disabled or self._finished or self._cancelled:
+            return
+        if time.monotonic() - self._request.last_request_time < interval:
             return
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
             return
         next_uri = self._request.next_uri
-        if next_uri is None or time.monotonic() - self._request.last_request_time < interval:
+        if next_uri is None:
             return
         self._request.last_request_time = time.monotonic()
         self._heartbeat_task = asyncio.get_running_loop().create_task(self._send_heartbeat(next_uri))
@@ -1367,12 +1366,6 @@ class TrinoQuery(object):
         if self._heartbeat_task is not None and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             await asyncio.gather(self._heartbeat_task, return_exceptions=True)
-
-    def is_finished(self) -> bool:
-        import warnings
-
-        warnings.warn("is_finished is deprecated, use finished instead", DeprecationWarning)
-        return self.finished
 
     @property
     def finished(self) -> bool:
@@ -1451,8 +1444,9 @@ def _parse_retry_after_header(retry_after):
         return int(retry_after)
     else:
         retry_date = parsedate_to_datetime(retry_after)
-        now = datetime.utcnow()
-        return (retry_date - now).total_seconds()
+        if retry_date.tzinfo is None:
+            retry_date = retry_date.replace(tzinfo=timezone.utc)
+        return max(0.0, (retry_date - datetime.now(timezone.utc)).total_seconds())
 
 
 # Trino Spooled protocol transfer objects
@@ -1552,17 +1546,23 @@ class SpooledSegment(Segment):
         request: TrinoRequest,
         coordinator_host: Optional[str] = None,
         custom_headers: Optional[dict[str, str]] = None,
+        coordinator_port: Optional[int] = None,
+        coordinator_scheme: Optional[str] = None,
     ) -> None:
         """
         :param request: request without credentials, see :meth:`TrinoRequest.unauthenticated`
         :param coordinator_host: host name of the coordinator; the custom HTTP headers of the connection are
-            only sent to that host (e.g. for the acknowledgement), never to an external storage
+            only sent to the coordinator (e.g. for the acknowledgement), never to an external storage
         :param custom_headers: custom HTTP headers of the connection (``http_headers``)
+        :param coordinator_port: port of the coordinator, compared with the URIs when given
+        :param coordinator_scheme: scheme of the coordinator (http, https), compared with the URIs when given
         """
         super().__init__(segment)
         self._segment = cast(_SpooledSegmentTO, segment)
         self._request = request
         self._coordinator_host = coordinator_host
+        self._coordinator_port = coordinator_port
+        self._coordinator_scheme = coordinator_scheme
         self._custom_headers = custom_headers or {}
 
     async def get_data(self) -> bytes:
@@ -1595,7 +1595,19 @@ class SpooledSegment(Segment):
             logger.error("Failed to acknowledge spooled segment %s: %s", self, e)
 
     def _is_coordinator(self, uri: str) -> bool:
-        return self._coordinator_host is not None and urllib.parse.urlsplit(uri).hostname == self._coordinator_host
+        if self._coordinator_host is None:
+            return False
+        parts = urllib.parse.urlsplit(uri)
+        if parts.hostname != self._coordinator_host:
+            return False
+        # an object storage may run on the same host (e.g. MinIO next to the coordinator): compare the origins
+        if self._coordinator_scheme is not None and parts.scheme != self._coordinator_scheme:
+            return False
+        if self._coordinator_port is not None:
+            port = parts.port or (constants.DEFAULT_TLS_PORT if parts.scheme == constants.HTTPS else 80)
+            if port != self._coordinator_port:
+                return False
+        return True
 
     async def _send_spooling_request(self, uri: str, timeout: Optional[float] = None) -> aiohttp.ClientResponse:
         if timeout is None:
@@ -1691,6 +1703,7 @@ class SegmentIterator:
         self._decoder: Optional[QueryDataDecoder] = None
         self._rows: Iterator[list[Any]] = iter([])
         self._finished = False
+        self._closed = False
         self._next_index = 0
         # [segment, task loading it] in segment order; the task is None when loading the segment failed
         self._pending: deque[list[Any]] = deque()
@@ -1714,31 +1727,45 @@ class SegmentIterator:
             self._finished = True
             return
         entry = self._pending[0]
-        if entry[1] is None:
-            entry[1] = self._start(entry[0])
-        try:
-            # shield: if the caller is cancelled, the download continues and is awaited by the next call
-            if self._query is not None and not entry[1].done():
-                async with self._query.keep_alive():
-                    rows = await asyncio.shield(entry[1])
-            else:
-                rows = await asyncio.shield(entry[1])
-        except asyncio.CancelledError:
-            if entry[1].cancelled():
-                entry[1] = None
-            raise
-        except BaseException:
-            entry[1] = None  # retry this segment on the next call
-            raise
+        while True:
+            if entry[1] is None:
+                entry[1] = self._start(entry[0])
+            task = entry[1]
+            try:
+                # shield: if the caller is cancelled, the download continues and is awaited by the next call
+                if self._query is not None and not task.done():
+                    async with self._query.keep_alive():
+                        rows = await asyncio.shield(task)
+                else:
+                    rows = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                self._check_open()
+                if task.cancelled() and entry[1] is task:
+                    entry[1] = None
+                if asyncio.current_task().cancelling():
+                    raise
+                # the download was cancelled by someone else: load the segment again
+            except BaseException:
+                self._check_open()
+                if entry[1] is task:
+                    entry[1] = None  # retry this segment on the next call
+                raise
+        self._check_open()
         self._pending.popleft()
         self._rows = iter(rows)
         self._schedule()
 
+    def _check_open(self) -> None:
+        if self._closed:
+            raise exceptions.ProgrammingError("the result was closed")
+
     def _schedule(self) -> None:
         while len(self._pending) < self._prefetch and self._next_index < len(self._segments):
             segment = self._segments[self._next_index]
+            task = self._start(segment)
             self._next_index += 1
-            self._pending.append([segment, self._start(segment)])
+            self._pending.append([segment, task])
 
     def _start(self, segment: DecodableSegment) -> asyncio.Task:
         if self._decoder is None:
@@ -1750,6 +1777,7 @@ class SegmentIterator:
     async def aclose(self) -> None:
         """Cancel the downloads in progress."""
         self._finished = True
+        self._closed = True
         self._rows = iter([])
         tasks = [task for _, task in self._pending if task is not None]
         self._pending.clear()
@@ -1797,8 +1825,28 @@ async def _load_segment(
         raise exceptions.TrinoSegmentError(f"Failed to decode {spooled} ({segment.encoding}): {_describe_error(e)}") from e
     _check_rows_count(spooled, decoded)
     if isinstance(spooled, SpooledSegment):
-        await spooled.acknowledge()
+        # In the background, like the Java client: once acknowledged, the server may delete the segment, so the
+        # decoded rows must not be lost if this task is cancelled while the acknowledgement is in flight.
+        _acknowledge_in_background(spooled)
     return decoded
+
+
+# acknowledgements in progress (strong references, the event loop only keeps weak references to tasks)
+_ACKNOWLEDGEMENTS: set[asyncio.Task] = set()
+
+
+def _acknowledge_in_background(segment: SpooledSegment) -> None:
+    task = asyncio.get_running_loop().create_task(segment.acknowledge())
+    _ACKNOWLEDGEMENTS.add(task)
+    task.add_done_callback(_ACKNOWLEDGEMENTS.discard)
+
+
+async def wait_for_acknowledgements(timeout: Optional[float] = None) -> None:
+    """Wait for the segment acknowledgements in progress in the running event loop."""
+    loop = asyncio.get_running_loop()
+    tasks = [task for task in _ACKNOWLEDGEMENTS if task.get_loop() is loop and not task.done()]
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
 
 
 def _describe_error(error: BaseException) -> str:

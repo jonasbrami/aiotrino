@@ -150,7 +150,7 @@ The cursors mirror the [ADBC Python DB-API](https://arrow.apache.org/adbc/curren
 
 | Method | Description |
 |---|---|
-| `await cur.fetch_arrow_table()` (alias `fetchallarrow()`) | the rest of the result as a `pyarrow.Table` (`fetchall_arrow()` is a deprecated alias) |
+| `await cur.fetch_arrow_table()` (alias `fetchallarrow()`) | the rest of the result as a `pyarrow.Table` |
 | `async for batch in cur.fetch_record_batches(prefetch=N)` | the rest of the result as `pyarrow.RecordBatch` objects |
 | `await cur.fetch_df(arrow_dtypes=False)` | a pandas DataFrame (TIME(9)/TIME(12) columns use `pandas.ArrowDtype`) |
 | `await cur.fetch_polars()` | a polars DataFrame (INTERVAL YEAR TO MONTH as a number of months) |
@@ -170,7 +170,7 @@ in the `trino.type` field metadata.
 ### Features
 
 - **Arrow Encoding**: In-memory columnar data format, support for 'arrow', 'arrow+zstd' encoding
-- **Flexible Fetching**: Use `fetch_arrow_table()` (formerly `fetchall_arrow()`, still available as a deprecated alias) for resultset that can fit in memory or use `fetchone_arrow()` for streaming result to client.
+- **Flexible Fetching**: Use `fetch_arrow_table()` for resultsets that can fit in memory or use `fetchone_arrow()` for streaming result to client.
 - **Async**: Asynchronous segment retrieval and parallel deserialization
 - **Easy Integration**: Zero copy, (almost) zero deserialization overhead
 

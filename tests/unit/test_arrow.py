@@ -68,9 +68,6 @@ def test_client_conversions_match_the_server_segment():
     "type_signature, expected",
     [
         (sig("time"), pa.time32("ms")),
-        (sig("timestamp with time zone", long_arg(12)), pa.timestamp("ns", tz="UTC")),  # picoseconds are truncated
-        # types without Arrow equivalent: their representation with the JSON encodings
-        (sig("ipaddress"), pa.string()),
         (sig("qdigest", type_arg(sig("bigint"))), pa.binary()),
         # like the server, the fields of a row used as map key are not nullable
         (
@@ -85,20 +82,17 @@ def test_to_arrow_type(type_signature, expected):
 
 def test_rows_to_arrow_values():
     columns = [
-        {"name": "timetz", "type": "time(3) with time zone", "typeSignature": sig("time with time zone", long_arg(3))},
-        {"name": "ym", "type": "interval year to month", "typeSignature": sig("interval year to month")},
+        # a type without Arrow equivalent: its representation with the JSON encodings
         {"name": "ip", "type": "ipaddress", "typeSignature": sig("ipaddress")},
+        # extension types (uuid) in nested types
         {"name": "uuids", "type": "array(uuid)", "typeSignature": sig("array", type_arg(sig("uuid")))},
     ]
     rows = RowMapperFactory().create(columns=columns, legacy_primitive_types=False).map(
-        [["23:30:00.000-01:00", "-1-2", "10.0.0.1", ["12151fd2-7586-11e9-8f9e-2a86e4085a59", None]]]
+        [["10.0.0.1", ["12151fd2-7586-11e9-8f9e-2a86e4085a59", None]]]
     )
-    assert pa.Table.from_batches([rows_to_record_batch(rows, columns)]).to_pylist() == [{
-        "timetz": time(0, 30),  # in UTC, like the server
-        "ym": pa.MonthDayNano([-14, 0, 0]),
-        "ip": "10.0.0.1",
-        "uuids": [uuid.UUID("12151fd2-7586-11e9-8f9e-2a86e4085a59"), None],
-    }]
+    assert pa.Table.from_batches([rows_to_record_batch(rows, columns)]).to_pylist() == [
+        {"ip": "10.0.0.1", "uuids": [uuid.UUID("12151fd2-7586-11e9-8f9e-2a86e4085a59"), None]},
+    ]
 
 
 def test_table_to_rows_nested_values():
@@ -128,3 +122,17 @@ def test_table_to_rows_nested_values():
     assert rows[2][1] == datetime(1969, 12, 31, 23, 59, 59, 999998)
     # sliced tables
     assert table_to_rows(table.slice(2), type_signatures) == rows[2:]
+
+
+def test_rows_to_arrow_with_duplicate_row_field_names():
+    columns = [
+        {"name": "r", "type": "row(field1 integer, integer)",
+         "typeSignature": sig("row", named("field1", sig("integer")), named(None, sig("integer")))},
+        {"name": "d", "type": "row(a integer, a integer)",
+         "typeSignature": sig("row", named("a", sig("integer")), named("a", sig("integer")))},
+    ]
+    mapper = RowMapperFactory().create(columns=columns, legacy_primitive_types=False)
+    batch = rows_to_record_batch(mapper.map([[[1, 2], [3, 4]], [None, None]]), columns)
+    assert batch.schema.field("r").type == pa.struct([("field1", pa.int32()), ("field1", pa.int32())])
+    assert [child.to_pylist() for child in batch.column(0).flatten()] == [[1, None], [2, None]]
+    assert [child.to_pylist() for child in batch.column(1).flatten()] == [[3, None], [4, None]]

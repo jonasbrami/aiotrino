@@ -28,7 +28,6 @@ from multidict import CIMultiDict
 
 import aiotrino.dbapi
 
-QUERY_ID = "20260101_000000_00000_fake0"
 COLUMNS = [
     {"name": "a", "type": "bigint", "typeSignature": {"rawType": "bigint", "arguments": []}},
     {"name": "s", "type": "varchar",
@@ -46,7 +45,7 @@ class Segment:
     headers: dict[str, list[str]] = field(default_factory=dict)  # to be sent by the client with the download
     delay: float = 0.0
     fail_status: Optional[int] = None
-    fail_times: Optional[int] = None  # fail the first N downloads only (None: always)
+    fail_times: int = 1  # fail the first N downloads with fail_status
     reset_times: int = 0  # abort the connection in the middle of the body for the first N downloads
     id: str = field(default="", init=False)
 
@@ -67,10 +66,11 @@ class Page:
 
 
 class FakeTrino:
-    def __init__(self, *, redirect: bool = False, heartbeat: bool = True):
+    def __init__(self, *, redirect: bool = False, heartbeat: bool = True, ack_delay: float = 0.0):
         # COORDINATOR_STORAGE_REDIRECT mode: segment URIs point to the coordinator which redirects to the storage
         self.redirect = redirect
         self.heartbeat = heartbeat
+        self.ack_delay = ack_delay
         self.pages: list[Page] = [Page()]  # the response to the POST: the query is queued
         self.segments: dict[str, Segment] = {}
         self.requests: list[Recorded] = []
@@ -124,15 +124,13 @@ class FakeTrino:
         return [r.path.rsplit("/", 1)[1] for r in self.recorded(prefix="/v1/spooled/ack/")]
 
     @staticmethod
-    def segment_tasks() -> list[asyncio.Task]:
-        """The tasks of the client loading segments."""
+    def segment_tasks() -> list[asyncio.Task]:  # the tasks of the client loading segments
         return [task for task in asyncio.all_tasks() if "_load_segment" in repr(task.get_coro())]
 
     def _record(self, server: str, request: web.Request) -> None:
         self.requests.append(Recorded(server, request.method, request.path, CIMultiDict(request.headers)))
 
-    def _attempt(self, *key: str) -> int:
-        """Return how many times this resource was requested before."""
+    def _attempt(self, *key: str) -> int:  # how many times this resource was requested before
         self.attempts[key] = self.attempts.get(key, 0) + 1
         return self.attempts[key] - 1
 
@@ -143,12 +141,12 @@ class FakeTrino:
         page = self.pages[token]
         last = token == len(self.pages) - 1
         body: dict[str, Any] = {
-            "id": QUERY_ID,
-            "infoUri": f"{base_url}/ui/query.html?{QUERY_ID}",
+            "id": "query",
+            "infoUri": f"{base_url}/ui/query.html?query",
             "stats": {"state": "FAILED" if page.error else "FINISHED" if last else "RUNNING", "queued": token == 0},
         }
         if not last and page.error is None:
-            body["nextUri"] = f"{base_url}/v1/statement/executing/{QUERY_ID}/slug/{token + 1}"
+            body["nextUri"] = f"{base_url}/v1/statement/executing/query/slug/{token + 1}"
         for key, value in (("columns", page.columns), ("error", page.error), ("updateType", page.update_type),
                            ("updateCount", page.update_count), ("data", page.data)):
             if value is not None:
@@ -197,6 +195,7 @@ class FakeTrino:
     async def _ack(self, request: web.Request) -> web.StreamResponse:
         self._record("coordinator", request)
         self._deleted.add(request.match_info["id"])
+        await asyncio.sleep(self.ack_delay)
         return web.Response(status=200)
 
     async def _info(self, request: web.Request) -> web.StreamResponse:
@@ -218,7 +217,7 @@ class FakeTrino:
             await asyncio.sleep(segment.delay)
         finally:
             self.downloading -= 1
-        if segment.fail_status is not None and (segment.fail_times is None or attempt < segment.fail_times):
+        if segment.fail_status is not None and attempt < segment.fail_times:
             return web.Response(status=segment.fail_status, text="storage error")
         if attempt < segment.reset_times:
             return await _reset_mid_body(request, segment.data)
@@ -243,11 +242,9 @@ def json_segment(start: int, count: int, compression: Optional[str] = None, **kw
     raw = json.dumps(json_rows(start, count)).encode()
     if compression == "zstd":
         import zstandard
-
         return Segment(zstandard.ZstdCompressor().compress(raw), count, uncompressed_size=len(raw), **kwargs)
     if compression == "lz4":
         import lz4.block
-
         return Segment(lz4.block.compress(raw, store_size=False), count, uncompressed_size=len(raw), **kwargs)
     return Segment(raw, count, **kwargs)
 
@@ -255,14 +252,12 @@ def json_segment(start: int, count: int, compression: Optional[str] = None, **kw
 def arrow_table(start: int, count: int):
     """The rows of :func:`json_rows` as an Arrow table."""
     import pyarrow as pa
-
     values = range(start, start + count)
     return pa.table({"a": pa.array(values, pa.int64()), "s": pa.array([f"v{i}" for i in values], pa.string())})
 
 
 def arrow_segment(start: int, count: int, compression: Optional[str] = None, max_chunksize=None, **kwargs) -> Segment:
     import pyarrow.ipc as ipc
-
     sink = io.BytesIO()
     table = arrow_table(start, count)
     with ipc.new_stream(sink, table.schema, options=ipc.IpcWriteOptions(compression=compression)) as writer:

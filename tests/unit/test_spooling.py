@@ -18,24 +18,29 @@ import pytest
 import aiotrino.client
 import aiotrino.dbapi
 from aiotrino.auth import BasicAuthentication, JWTAuthentication
-from aiotrino.exceptions import TrinoSegmentError
+from aiotrino.exceptions import ProgrammingError, TrinoSegmentError
 from tests.unit.fake_trino import COLUMNS, FakeTrino, Segment, json_rows, json_segment
 
 SSE_C_HEADER = "x-amz-server-side-encryption-customer-key"
 
 
 @pytest.mark.parametrize(
-    "auth, redirect",
-    [(BasicAuthentication("alice", "s3cret"), False), (JWTAuthentication("token"), True)],
-    ids=["basic", "jwt-redirect"],
+    "auth, redirect, host",
+    [
+        (BasicAuthentication("alice", "s3cret"), False, "127.0.0.1"),
+        (JWTAuthentication("token"), True, "127.0.0.1"),
+        # the coordinator is reached with the host name of the storage (e.g. MinIO next to the coordinator)
+        (JWTAuthentication("token"), False, "localhost"),
+    ],
+    ids=["basic", "jwt-redirect", "same-host"],
 )
-async def test_storage_only_gets_the_segment_headers(auth, redirect):
+async def test_storage_only_gets_the_segment_headers(auth, redirect, host):
     """Credentials, X-Trino headers and custom headers never reach the object storage."""
     headers = {SSE_C_HEADER: ["sse-key"], "X-Multi": ["a", "b"]}
     async with FakeTrino(redirect=redirect) as trino:
         segments = [json_segment(0, 2, headers=headers), json_segment(2, 2, headers=headers)]
         trino.add_page(columns=COLUMNS, segments=segments, encoding="json")
-        conn = trino.connect(encoding="json", auth=auth, http_headers={"X-Custom": "custom"},
+        conn = trino.connect(host=host, encoding="json", auth=auth, http_headers={"X-Custom": "custom"},
                              extra_credential=[("credential.key", "secret")], session_properties={"timeout": "1h"})
         async with conn:
             cur = await conn.cursor()
@@ -80,8 +85,8 @@ async def test_segments_are_loaded_lazily_and_in_order():
 async def test_failed_segment_download_is_retried_then_loaded_again():
     async with FakeTrino() as trino:
         # a connection reset in the middle of the body, HTTP 503 (retried), then HTTP 500 (not retried)
-        segments = [json_segment(0, 2, reset_times=1), json_segment(2, 2, fail_status=503, fail_times=1),
-                    json_segment(4, 2, fail_status=500, fail_times=1)]
+        segments = [json_segment(0, 2, reset_times=1), json_segment(2, 2, fail_status=503),
+                    json_segment(4, 2, fail_status=500)]
         trino.add_page(columns=COLUMNS, segments=segments, encoding="json")
         async with trino.cursor(encoding="json", max_attempts=2) as cur:
             await cur.execute("SELECT 1")
@@ -145,13 +150,20 @@ async def test_compressed_segments_are_decoded_in_worker_threads(monkeypatch, cu
     assert threading.main_thread() not in threads
 
 
-async def test_closing_the_cursor_cancels_the_pending_downloads():
+@pytest.mark.parametrize("cursor_style", ["row", "segment"])
+async def test_closing_the_cursor_cancels_the_pending_downloads(cursor_style):
+    if cursor_style == "segment":
+        pytest.importorskip("pyarrow")
     async with FakeTrino() as trino:
         trino.add_page(columns=COLUMNS, segments=[json_segment(0, 2), json_segment(2, 2, delay=5)], encoding="json")
-        async with trino.cursor(encoding="json") as cur:
+        async with trino.cursor(cursor_style, encoding="json") as cur:
             await cur.execute("SELECT 1")
-            assert await cur.fetchmany(2) == json_rows(0, 2)
+            reader = asyncio.create_task(cur.fetch_arrow_table() if cursor_style == "segment" else cur.fetchall())
+            await asyncio.sleep(0.1)
             await asyncio.wait_for(cur.close(), 1)
+            # the task reading the result does not return a partial result
+            with pytest.raises(ProgrammingError, match="closed"):
+                await reader
             assert trino.segment_tasks() == []
         assert trino.acks == ["0"]
 
@@ -180,3 +192,18 @@ async def test_heartbeats(heartbeat_interval, server_supports_heartbeats, expect
     assert set(targets) == expected_targets
     if not server_supports_heartbeats:
         assert len(targets) == 1
+
+
+async def test_cancelled_fetch_does_not_lose_a_row():
+    async with FakeTrino() as trino:
+        trino.add_page(columns=COLUMNS, data=json_rows(0, 2000))
+        async with trino.cursor(encoding=None) as cur:
+            await cur.execute("SELECT 1")
+            assert len(await cur.fetchmany(1000)) == 1000
+            # the next fetch yields to the event loop (every 1000 rows): cancel it there
+            task = asyncio.create_task(cur.fetchone())
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await cur.fetchone() == [1000, "v1000"]

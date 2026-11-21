@@ -11,12 +11,16 @@
 # limitations under the License.
 """Tests of the HTTP behaviour of the client against a fake coordinator (see fake_trino.py)."""
 import asyncio
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from unittest import mock
 
 import aiohttp
 import pytest
 
 import aiotrino.dbapi
 from aiotrino import constants, exceptions
+from aiotrino.client import _parse_retry_after_header
 from tests.unit.fake_trino import COLUMNS, FakeTrino, Page, json_rows
 
 
@@ -38,13 +42,13 @@ async def test_session_state_is_sent_with_the_next_requests():
             await execute({constants.HEADER_SET_SESSION: f"large_property={large_value}",
                            constants.HEADER_ADDED_PREPARE: "st1=SELECT+1", constants.HEADER_SET_AUTHORIZATION_USER: "bob"})
             assert conn._client_session.properties == {"large_property": large_value}
-            headers = await execute({constants.HEADER_DEALLOCATED_PREPARE: "st1"})
+            headers = await execute({constants.HEADER_DEALLOCATED_PREPARE: "st1",
+                                     constants.HEADER_RESET_AUTHORIZATION_USER: "true"})
             assert headers[constants.HEADER_SESSION] == f"large_property={large_value}"
             assert headers[constants.HEADER_PREPARED_STATEMENT] == "st1=SELECT+1"
             assert (headers[constants.HEADER_USER], headers[constants.HEADER_ORIGINAL_USER]) == ("bob", "alice")
-            headers = await execute({constants.HEADER_RESET_AUTHORIZATION_USER: "true"})
-            assert constants.HEADER_PREPARED_STATEMENT not in headers
             headers = await execute({})
+            assert constants.HEADER_PREPARED_STATEMENT not in headers
             assert headers[constants.HEADER_USER] == "alice"
             assert constants.HEADER_ORIGINAL_USER not in headers
             assert constants.HEADER_USER not in conn._http_session.headers
@@ -123,8 +127,31 @@ async def test_closing_the_cursor_only_cancels_a_running_query(update_type, canc
 )
 async def test_errors_are_dbapi_errors(page, error_class, vendor_code):
     async with FakeTrino() as trino:
-        trino.pages.append(page)
+        trino.add_page(columns=COLUMNS, data=json_rows(0, 2))
         async with trino.cursor(encoding=None) as cur:
+            await cur.execute("SELECT 1")
+            assert await cur.fetchone() == [0, "v0"]
+            trino.pages[1] = page
             with pytest.raises(error_class) as error:
-                await cur.execute("SELECT 1")
+                await cur.execute("SELECT 2")
+            # the rest of the previous result is not returned
+            with pytest.raises(exceptions.ProgrammingError):
+                await cur.fetchone()
     assert getattr(error.value, "vendor_code", None) == vendor_code
+
+
+def test_retry_after_header():
+    assert _parse_retry_after_header("5") == 5
+    assert _parse_retry_after_header("Wed, 21 Oct 2015 07:28:00 GMT") == 0
+    in_30_seconds = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=30), usegmt=True)
+    assert 25 < _parse_retry_after_header(in_30_seconds) <= 30
+
+
+async def test_connection_is_closed_when_the_rollback_runs():
+    conn = aiotrino.dbapi.connect("localhost")
+    conn.commit = mock.AsyncMock(side_effect=exceptions.DatabaseError("commit failed"))
+    conn.rollback = mock.AsyncMock()
+    async with conn:
+        pass
+    conn.rollback.assert_awaited_once()
+    assert conn.is_closed()

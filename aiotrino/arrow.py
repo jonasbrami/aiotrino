@@ -217,7 +217,6 @@ def _value_converter(arrow_type, type_signature: dict[str, Any]) -> Optional[Cal
         return lambda value: None if value is None else [(key(k), item(v)) for k, v in value.items()]
 
     if pa.types.is_struct(arrow_type):
-        names = [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
         converters = [
             _value_converter(arrow_type.field(i).type, field_signature) or _identity
             for i, (_, field_signature) in enumerate(_row_fields(type_signature))
@@ -226,8 +225,9 @@ def _value_converter(arrow_type, type_signature: dict[str, Any]) -> Optional[Cal
         def convert_row(value):
             if value is None:
                 return None
-            # rows are NamedRowTuple instances, field names may be missing or duplicated: use positions
-            return {name: converter(item) for name, converter, item in zip(names, converters, value, strict=True)}
+            # rows are NamedRowTuple instances, field names may be missing or duplicated: build the struct
+            # positionally (pyarrow accepts tuples for struct values)
+            return tuple(converter(item) for converter, item in zip(converters, value, strict=True))
 
         return convert_row
 

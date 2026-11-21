@@ -16,7 +16,7 @@ from datetime import timedelta, timezone
 import pytest
 
 from aiotrino import constants
-from aiotrino.exceptions import NotSupportedError, TrinoSegmentError
+from aiotrino.exceptions import NotSupportedError, OperationalError, TrinoSegmentError
 from aiotrino.types import NamedRowTuple
 from tests.unit.arrow_fixtures import FIXTURE_COLUMNS, fixture_rows, read_fixture
 from tests.unit.fake_trino import COLUMNS, FakeTrino, Segment, arrow_segment, arrow_table, json_rows, json_segment
@@ -81,7 +81,7 @@ async def test_segment_cursor_fetch_methods():
     """The fetch methods of the segment cursor can be mixed, each one continues with the rest of the result."""
     async with FakeTrino() as trino:
         trino.add_page(columns=COLUMNS, segments=[arrow_segment(0, 2), arrow_segment(2, 2)], encoding="arrow")
-        segments = [arrow_segment(4, 2, delay=0.1), arrow_segment(6, 4, max_chunksize=2, delay=0.1)]
+        segments = [arrow_segment(4, 4, max_chunksize=2, delay=0.1), arrow_segment(8, 4, max_chunksize=2, delay=0.1)]
         trino.add_page(columns=COLUMNS, segments=segments, encoding="arrow")
         async with trino.cursor("segment") as cur:
             await cur.execute("SELECT 1")
@@ -91,8 +91,10 @@ async def test_segment_cursor_fetch_methods():
             # the iterator, left after its first batch, is closed by the event loop while the next calls run
             assert _values(await anext(cur.fetch_record_batches(prefetch=2))) == [4, 5]
             assert cur.rownumber == 6
-            assert [_values(batch) async for batch in cur.fetch_record_batches()] == [[6, 7], [8, 9]]
-            assert cur.rownumber == 10
+            # the rest of the segment is not lost
+            assert _values(await cur.fetchone_arrow()) == [6, 7]
+            assert [_values(batch) async for batch in cur.fetch_record_batches()] == [[8, 9], [10, 11]]
+            assert cur.rownumber == 12
             assert (await cur.fetchallarrow()).num_rows == 0
 
 
@@ -114,7 +116,7 @@ async def test_row_cursor_fetch_arrow_table(legacy_primitive_types):
 async def test_interrupted_fetch_cancels_the_downloads(interruption):
     """After an error, a cancellation or leaving fetch_record_batches(), no download keeps running in the background
     and the segments not delivered are loaded again by the next call."""
-    first = {"error": {"fail_status": 500, "fail_times": 1}, "cancel": {"delay": 0.2}, "aclose": {}}[interruption]
+    first = {"error": {"fail_status": 500}, "cancel": {"delay": 0.2}, "aclose": {}}[interruption]
     async with FakeTrino() as trino:
         segments = [arrow_segment(0, 2, **first)] + [arrow_segment(i, 2, delay=0.2) for i in (2, 4, 6)]
         trino.add_page(columns=COLUMNS, segments=segments, encoding="arrow")
@@ -183,3 +185,56 @@ async def test_row_cursor_decodes_arrow_segments_like_json():
     assert by_name["c_timetz3"].tzinfo == timezone.utc
     assert by_name["c_tstz3"].utcoffset() == timedelta(0)
     assert isinstance(by_name["c_row_anon"], NamedRowTuple)
+
+
+@pytest.mark.parametrize("cursor_style, method, failure", [
+    ("segment", "fetchone_arrow", "page"), ("segment", "fetch_record_batches", "page"),
+    ("segment", "fetch_arrow_table", "segment"), ("row", "fetch_arrow_table", "segment"),
+])
+async def test_no_rows_lost_when_a_fetch_fails(cursor_style, method, failure):
+    async with FakeTrino() as trino:
+        for i in range(4):
+            trino.add_page(columns=COLUMNS, segments=[arrow_segment(i * 3, 3)], encoding="arrow")
+        trino.add_page(columns=COLUMNS)
+        if failure == "page":
+            trino.pages[4].reset_times = 1  # the response of the 4th page is interrupted once
+        else:
+            trino.segments["3"].fail_status = 500
+        async with trino.cursor(cursor_style) as cur:
+            await cur.execute("SELECT 1")
+            values = []
+            for _ in range(2):
+                try:
+                    if method == "fetchone_arrow":
+                        while (table := await cur.fetchone_arrow()) is not None:
+                            values += _values(table)
+                    elif method == "fetch_record_batches":
+                        async for batch in cur.fetch_record_batches(prefetch=1):
+                            values += _values(batch)
+                    else:
+                        values += _values(await cur.fetch_arrow_table())
+                    break
+                except OperationalError:
+                    pass  # fetch again
+            assert values == list(range(12))
+            assert cur.rownumber == 12
+        assert trino.attempts[("page", "4") if failure == "page" else ("segment", "3")] == 2
+
+
+async def test_cancellation_while_acknowledging_does_not_lose_the_segment():
+    """The coordinator deletes a segment once acknowledged: a decoded segment must not be downloaded again."""
+    async with FakeTrino(ack_delay=0.2) as trino:
+        trino.add_page(columns=COLUMNS, segments=[arrow_segment(0, 3), arrow_segment(3, 3, delay=0.3)], encoding="arrow")
+        async with trino.cursor("segment") as cur:
+            await cur.execute("SELECT 1")
+            task = asyncio.create_task(cur.fetch_arrow_table())
+            for _ in range(100):
+                if trino.acks:
+                    break
+                await asyncio.sleep(0.01)
+            assert trino.acks == ["0"]
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert _values(await cur.fetch_arrow_table()) == list(range(6))
+        assert [r.path for r in trino.recorded("storage")].count("/bucket/0") == 1

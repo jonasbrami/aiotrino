@@ -11,6 +11,9 @@
 # limitations under the License.
 """Tests of the ADBC-style API of the cursors and connections."""
 import pickle
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -110,3 +113,20 @@ async def test_fetch_polars():
     assert [(row["l"], row["s"]) for row in rows] == [([14, None], {"x": 1}), (None, None)]
     # the representation of maps depends on the polars version
     assert rows[0]["m"] in ({"a": 3}, [{"key": "a", "value": 3}])
+
+
+def test_arrow_methods_without_pyarrow():
+    """Without pyarrow, the Arrow methods raise an ImportError explaining how to install it."""
+    code = textwrap.dedent("""
+        import asyncio, sys
+        sys.modules["pyarrow"] = None  # "import pyarrow" raises an ImportError
+        import aiotrino.dbapi
+
+        async def main():
+            async with aiotrino.dbapi.connect("localhost") as conn:
+                await (await conn.cursor()).fetch_arrow_table()
+
+        asyncio.run(main())
+    """)
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert "ImportError: PyArrow is required" in result.stderr

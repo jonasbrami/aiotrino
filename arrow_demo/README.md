@@ -94,7 +94,7 @@ With Arrow encoding, this architecture really shines. Each spooled segment is a 
 
 ![Spooling Protocol Sequence Diagram](images/spooling_protocol.png)
 
-In `aiotrino`, the `fetch_arrow_table()` method (formerly `fetchall_arrow()`) implements a fully pipelined retrieval loop. It keeps awaiting the next segment URI from the Trino coordinator, and as soon as one arrives, it immediately fires off a concurrent task — no waiting for the previous one to finish. Each task downloads the segment data (async HTTP, with a bounded number of segments in flight) and then hands the raw bytes to worker threads (`asyncio.to_thread`) for deserialization. Because PyArrow releases the GIL, these threads achieve true parallelism.
+In `aiotrino`, the `fetch_arrow_table()` method implements a fully pipelined retrieval loop. It keeps awaiting the next segment URI from the Trino coordinator, and as soon as one arrives, it immediately fires off a concurrent task — no waiting for the previous one to finish. Each task downloads the segment data (async HTTP, with a bounded number of segments in flight) and then hands the raw bytes to worker threads (`asyncio.to_thread`) for deserialization. Because PyArrow releases the GIL, these threads achieve true parallelism.
 
 The result is a three-stage pipeline where coordinator polling, HTTP downloads, and Arrow deserialization all overlap:
 

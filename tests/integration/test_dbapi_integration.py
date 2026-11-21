@@ -2528,7 +2528,7 @@ async def test_row_cursor_with_arrow_encoding(trino_connection_with_arrow: Conne
 )
 @pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.skipif(not PYARROW_AVAILABLE, reason="PyArrow not available")
-async def test_fetchall_arrow_with_json_encoding(trino_connection: Connection):
+async def test_fetch_arrow_table_with_json_encoding(trino_connection: Connection):
     """With a JSON encoding (or a server without Arrow support), the Arrow methods convert the rows to Arrow."""
     if trino_connection._client_session.encoding is None:
         pytest.skip("SegmentCursor requires an encoding")

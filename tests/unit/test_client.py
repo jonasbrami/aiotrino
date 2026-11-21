@@ -111,32 +111,31 @@ async def test_request_headers(mock_get_and_post):
     client_info_value = "some_client_info"
     encoding = "json+zstd"
 
-    with pytest.deprecated_call():
-        req = TrinoRequest(
-            host="coordinator",
-            port=8080,
-            client_session=ClientSession(
-                user=user,
-                authorization_user=authorization_user,
-                source=source,
-                catalog=catalog,
-                schema=schema,
-                timezone=timezone,
-                encoding=encoding,
-                headers={
-                    accept_encoding_header: accept_encoding_value,
-                    client_info_header: client_info_value,
-                },
-                roles={
-                    "hive": "ALL",
-                    "system": "analyst",
-                    "catalog1": "NONE",
-                    # ensure backwards compatibility
-                    "catalog2": "ROLE{catalog2_role}",
-                }
-            ),
-            http_scheme="http",
-        )
+    req = TrinoRequest(
+        host="coordinator",
+        port=8080,
+        client_session=ClientSession(
+            user=user,
+            authorization_user=authorization_user,
+            source=source,
+            catalog=catalog,
+            schema=schema,
+            timezone=timezone,
+            encoding=encoding,
+            headers={
+                accept_encoding_header: accept_encoding_value,
+                client_info_header: client_info_value,
+            },
+            roles={
+                "hive": "ALL",
+                "system": "analyst",
+                "catalog1": "NONE",
+                # ensure backwards compatibility
+                "catalog2": "catalog2_role",
+            }
+        ),
+        http_scheme="http",
+    )
 
     def assert_headers(headers, expected_count=13):
         assert headers[constants.HEADER_CATALOG] == catalog
@@ -144,7 +143,7 @@ async def test_request_headers(mock_get_and_post):
         assert headers[constants.HEADER_SOURCE] == source
         assert headers[constants.HEADER_USER] == authorization_user
         assert headers[constants.HEADER_ORIGINAL_USER] == user
-        assert constants.HEADER_AUTHORIZATION_USER not in headers
+        assert "X-Trino-Authorization-User" not in headers
         assert headers[constants.HEADER_SESSION] == ""
         assert headers[constants.HEADER_TIMEZONE] == timezone
         assert headers[constants.HEADER_CLIENT_CAPABILITIES] == "PARAMETRIC_DATETIME,SESSION_AUTHORIZATION"
@@ -361,6 +360,11 @@ async def test_http_scheme_with_port(mock_get_and_post):
     assert parsed_url.port == constants.DEFAULT_TLS_PORT
 
 
+# SocketTimeoutError and ConnectionTimeoutError were added in aiohttp 3.10
+TIMEOUT_ERRORS = (asyncio.TimeoutError, aiohttp.ServerTimeoutError, *(
+    getattr(aiohttp, name) for name in ("SocketTimeoutError", "ConnectionTimeoutError") if hasattr(aiohttp, name)))
+
+
 @async_httprettified
 @pytest.mark.asyncio
 async def test_request_timeout():
@@ -392,20 +396,10 @@ async def test_request_timeout():
         request_timeout=timeout,
     )
 
-    with pytest.raises((
-        asyncio.TimeoutError,
-        aiohttp.client_exceptions.ServerTimeoutError,
-        aiohttp.client_exceptions.SocketTimeoutError,
-        aiohttp.client_exceptions.ConnectionTimeoutError,
-    )):
+    with pytest.raises(TIMEOUT_ERRORS):
         await req.get(url)
 
-    with pytest.raises((
-        asyncio.TimeoutError,
-        aiohttp.client_exceptions.ServerTimeoutError,
-        aiohttp.client_exceptions.SocketTimeoutError,
-        aiohttp.client_exceptions.ConnectionTimeoutError,
-    )):
+    with pytest.raises(TIMEOUT_ERRORS):
         await req.post("select 1")
 
 

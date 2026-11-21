@@ -10,8 +10,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Optional
 import os
+from typing import Any, Optional
 
 DEFAULT_PORT = int(os.environ.get("TRINO_DEFAULT_PORT", 8080))
 DEFAULT_TLS_PORT = 443
@@ -69,8 +69,6 @@ CLIENT_CAPABILITY_PARAMETRIC_DATETIME = "PARAMETRIC_DATETIME"
 CLIENT_CAPABILITY_SESSION_AUTHORIZATION = "SESSION_AUTHORIZATION"
 CLIENT_CAPABILITIES = ",".join([CLIENT_CAPABILITY_PARAMETRIC_DATETIME, CLIENT_CAPABILITY_SESSION_AUTHORIZATION])
 
-# Deprecated: not a Trino protocol header, the authorization user is sent in X-Trino-User (see HEADER_ORIGINAL_USER)
-HEADER_AUTHORIZATION_USER = "X-Trino-Authorization-User"
 HEADER_SET_AUTHORIZATION_USER = "X-Trino-Set-Authorization-User"
 HEADER_RESET_AUTHORIZATION_USER = "X-Trino-Reset-Authorization-User"
 
@@ -82,5 +80,3 @@ SCALE_TYPES = ["decimal"]
 DEFAULT_SEGMENT_PREFETCH = int(os.environ.get("TRINO_SEGMENT_PREFETCH", 2))
 # Maximum number of spooled segments downloaded concurrently by SegmentCursor.fetch_arrow_table()
 MAX_PARALLEL_SEGMENT_RETRIEVAL = int(os.environ.get("TRINO_MAX_PARALLEL_SEGMENT_RETRIEVAL", 100))
-# Deprecated, unused: segments are decoded with asyncio.to_thread() (the default executor of the event loop)
-ARROW_THREAD_POOL_SIZE = int(os.environ.get("TRINO_ARROW_THREAD_POOL_SIZE", 20))
