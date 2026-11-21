@@ -308,3 +308,18 @@ def test_trino_connection_basic_auth():
 #     _, cparams = dialect.create_connect_args(url)
 
 #     assert isinstance(cparams['auth'], OAuth2Authentication)
+
+
+def test_async_fallback_pool_class():
+    from sqlalchemy import exc, pool
+
+    from aiotrino.sqlalchemy import dialect
+
+    assert AIOTrinoDialect.get_pool_class(make_url("aiotrino://user@localhost:8080/")) is pool.AsyncAdaptedQueuePool
+    url = make_url("aiotrino://user@localhost:8080/?async_fallback=true")
+    if dialect.await_fallback is None:
+        # SQLAlchemy >= 2.1 removed the async_fallback mode
+        with pytest.raises(exc.ArgumentError, match="async_fallback"):
+            AIOTrinoDialect.get_pool_class(url)
+    else:
+        assert AIOTrinoDialect.get_pool_class(url) is pool.FallbackAsyncAdaptedQueuePool

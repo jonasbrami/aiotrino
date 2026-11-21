@@ -10,8 +10,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import inspect
 import time
 import urllib
+from types import SimpleNamespace
 from typing import Dict, Optional
 from unittest import mock
 from urllib.parse import urlparse
@@ -38,6 +40,10 @@ from aiotrino.client import (
 
 
 def create_response() -> aiohttp.ClientResponse:
+    kwargs = {}
+    if "stream_writer" in inspect.signature(aiohttp.ClientResponse.__init__).parameters:
+        # aiohttp >= 3.14 requires the stream writer of the (already sent) request
+        kwargs["stream_writer"] = SimpleNamespace(output_size=0)
     client_response = TrinoRequest.http.ClientResponse(
         'POST',
         URL('aiotrino://user@localhost:8080/?source=aiotrino-sqlalchemy'),
@@ -48,6 +54,7 @@ def create_response() -> aiohttp.ClientResponse:
         traces=[],
         loop=asyncio.get_running_loop(),
         session=None,
+        **kwargs,
     )
     class MockReader:
         async def read(self):
@@ -131,15 +138,16 @@ async def test_request_headers(mock_get_and_post):
             http_scheme="http",
         )
 
-    def assert_headers(headers):
+    def assert_headers(headers, expected_count=13):
         assert headers[constants.HEADER_CATALOG] == catalog
         assert headers[constants.HEADER_SCHEMA] == schema
         assert headers[constants.HEADER_SOURCE] == source
-        assert headers[constants.HEADER_USER] == user
-        assert headers[constants.HEADER_AUTHORIZATION_USER] == authorization_user
+        assert headers[constants.HEADER_USER] == authorization_user
+        assert headers[constants.HEADER_ORIGINAL_USER] == user
+        assert constants.HEADER_AUTHORIZATION_USER not in headers
         assert headers[constants.HEADER_SESSION] == ""
         assert headers[constants.HEADER_TIMEZONE] == timezone
-        assert headers[constants.HEADER_CLIENT_CAPABILITIES] == "PARAMETRIC_DATETIME"
+        assert headers[constants.HEADER_CLIENT_CAPABILITIES] == "PARAMETRIC_DATETIME,SESSION_AUTHORIZATION"
         assert headers[accept_encoding_header] == accept_encoding_value
         assert headers[client_info_header] == client_info_value
         assert headers[constants.HEADER_ROLE] == (
@@ -151,11 +159,12 @@ async def test_request_headers(mock_get_and_post):
         assert headers["User-Agent"] == f"{constants.CLIENT_NAME}/{__version__}"
         assert headers[constants.HEADER_ENCODING] == encoding
         assert constants.HEADER_TRANSACTION not in headers
-        assert len(headers.keys()) == 13
+        assert len(headers.keys()) == expected_count
 
     await req.post("URL")
     _, post_kwargs = post.call_args
-    assert_headers(post_kwargs["headers"])
+    assert post_kwargs["headers"][constants.HEADER_CONTENT_TYPE] == "text/plain; charset=utf-8"
+    assert_headers(post_kwargs["headers"], expected_count=14)
 
     await req.get("URL")
     _, get_kwargs = get.call_args
@@ -220,6 +229,7 @@ async def test_additional_request_post_headers(mock_get_and_post):
 
     combined_headers = req.http_headers
     combined_headers.update(additional_headers)
+    combined_headers[constants.HEADER_CONTENT_TYPE] = constants.CONTENT_TYPE_TEXT_UTF8
 
     await req.post(sql, additional_headers)
 

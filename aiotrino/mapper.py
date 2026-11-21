@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import base64
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from decimal import Decimal
@@ -194,19 +195,31 @@ class IntervalYearToMonthMapper(ValueMapper[relativedelta]):
         return relativedelta(years=years, months=months)
 
 
+# "[-]D HH:MM:SS[.fraction]" with 0 to 12 fractional digits. Servers without the PARAMETRIC_INTERVAL client
+# capability always send 3 digits (milliseconds); parametric intervals use the declared fractional precision.
+_INTERVAL_DAY_TO_SECOND_PATTERN = re.compile(r"(-)?(\d+) (\d+):(\d+):(\d+)(?:\.(\d{1,12}))?")
+_PICOS_PER_MICRO = 1_000_000
+
+
 class IntervalDayToSecondMapper(ValueMapper[timedelta]):
     def map(self, value: Any) -> Optional[timedelta]:
         if value is None:
             return None
-        is_negative = value[0] == "-"
-        days, time = (value[1:] if is_negative else value).split(" ")
-        hours, minutes, seconds_milliseconds = time.split(":")
-        seconds, milliseconds = seconds_milliseconds.split(".")
-        days, hours, minutes, seconds, milliseconds = (int(days), int(hours), int(minutes), int(seconds), int(milliseconds))
-        if is_negative:
-            days, hours, minutes, seconds, milliseconds = -days, -hours, -minutes, -seconds, -milliseconds
+        match = _INTERVAL_DAY_TO_SECOND_PATTERN.fullmatch(value)
+        if match is None:
+            raise ValueError(f"Invalid interval day to second value: {value!r}")
+        sign, days, hours, minutes, seconds, fraction = match.groups()
+        # Python's timedelta has microsecond precision: scale the fraction to picoseconds and round
+        # (half to even, like the timestamp mappers) to microseconds.
+        picos = int(fraction.ljust(12, "0")) if fraction else 0
+        micros, remainder = divmod(picos, _PICOS_PER_MICRO)
+        if remainder > _PICOS_PER_MICRO // 2 or (remainder == _PICOS_PER_MICRO // 2 and micros % 2 == 1):
+            micros += 1
+        total_micros = (((int(days) * 24 + int(hours)) * 60 + int(minutes)) * 60 + int(seconds)) * 1_000_000 + micros
+        if sign:
+            total_micros = -total_micros
         try:
-            return timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds, milliseconds=milliseconds)
+            return timedelta(microseconds=total_micros)
         except OverflowError as e:
             error_str = (
                 f"Could not convert '{value}' into the associated python type, as the value exceeds the maximum or minimum limit."

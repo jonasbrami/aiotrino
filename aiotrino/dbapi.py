@@ -88,7 +88,9 @@ __all__ = [
 
 
 apilevel = "2.0"
-threadsafety = 2
+# Threads may share the module but not connections: a connection, its aiohttp sessions and its cursors are bound to
+# the event loop which created them and are not thread-safe.
+threadsafety = 1
 paramstyle = "qmark"
 
 logger = aiotrino.logging.get_logger(__name__)
@@ -176,16 +178,19 @@ class Connection(object):
         roles: Optional[Union[dict[str, str], str]] = None,
         timezone: Optional[str] = None,
         encoding: Union[str, list[str]] = _USE_DEFAULT_ENCODING,
+        heartbeat_interval: Optional[float] = constants.DEFAULT_HEARTBEAT_INTERVAL,
     ):
+        """
+        :param heartbeat_interval: interval in seconds of the heartbeats sent to the coordinator while the client is
+            busy downloading spooled segments or slowly consuming the results, so that the query is not abandoned
+            after ``query.client.timeout``. ``None`` disables them.
+        """
         # Automatically assign http_schema, port based on hostname
         parsed_host = urlparse(host, allow_fragments=False)
 
         if encoding is _USE_DEFAULT_ENCODING:
-            encoding = [
-                "json+zstd",
-                "json+lz4",
-                "json",
-            ]
+            # JSON encodings whose compression library is installed
+            encoding = aiotrino.client.available_json_encodings()
             # Only include arrow encoding if pyarrow is available
             if PYARROW_AVAILABLE:
                 encoding.append("arrow")
@@ -210,14 +215,14 @@ class Connection(object):
             roles=roles,
             timezone=timezone,
             encoding=encoding,
+            heartbeat_interval=heartbeat_interval,
         )
-        # mypy cannot follow module import
-        if http_session is None:
-            self._http_session = aiotrino.client.TrinoRequest.http.ClientSession(
-                connector=aiotrino.client.TrinoTCPConnector(verify_ssl=verify)
-            )
-        else:
-            self._http_session = http_session
+        # The aiohttp session needs a running event loop, it is created on first use by _create_request()
+        self._http_session = http_session
+        self._owns_http_session = http_session is None
+        # Spooled segments are downloaded with a separate session, without credentials nor default headers
+        self._segment_http_session: Optional[aiohttp.ClientSession] = None
+        self._closed = False
         self.http_headers = http_headers
         self.http_scheme = http_scheme if not parsed_host.scheme else parsed_host.scheme
         self.auth = auth
@@ -253,10 +258,13 @@ class Connection(object):
             await self.close()
 
     async def close(self):
-        """Trino does not have anything to close"""
+        """Close the HTTP session created by this connection. A session passed by the caller is not closed."""
         # TODO cancel outstanding queries?
-        if self._http_session and not self._http_session.closed:
-            await self._http_session.connector.close()
+        self._closed = True
+        if self._owns_http_session and self._http_session is not None and not self._http_session.closed:
+            await self._http_session.close()
+        if self._segment_http_session is not None and not self._segment_http_session.closed:
+            await self._segment_http_session.close()
 
     async def start_transaction(self):
         self._transaction = Transaction(self._create_request())
@@ -280,8 +288,10 @@ class Connection(object):
     def _create_request(self):
         # Creating session here because aiohttp requires it to be created inside the event loop.
         # The Connection only calls this from async functions so therefore it will be in event loop
+        if self._closed:
+            raise aiotrino.exceptions.InterfaceError("Connection is closed")
         if self._http_session is None:
-            self._http_session = aiohttp.ClientSession(connector=aiotrino.client.TrinoTCPConnector(verify_ssl=self._verify_ssl))  # type: ignore
+            self._http_session = aiotrino.client.create_http_session(self._verify_ssl)
 
         return aiotrino.client.TrinoRequest(
             host=self.host,
@@ -292,7 +302,14 @@ class Connection(object):
             auth=self.auth,
             max_attempts=self.max_attempts,
             request_timeout=self.request_timeout,
+            verify=self._verify_ssl,
+            segment_http_session_provider=self._get_segment_http_session,
         )
+
+    def _get_segment_http_session(self) -> aiohttp.ClientSession:
+        if self._segment_http_session is None or self._segment_http_session.closed:
+            self._segment_http_session = aiotrino.client.create_http_session(self._verify_ssl)
+        return self._segment_http_session
 
     async def cursor(self, cursor_style: str = "row", legacy_primitive_types: bool = None) -> "Cursor":
         """Return a new :py:class:`Cursor` object using the connection."""
@@ -341,7 +358,7 @@ class Connection(object):
         return value
 
     def is_closed(self) -> bool:
-        return self._http_session and self._http_session.closed
+        return self._closed or (self._http_session is not None and self._http_session.closed)
 
 
 class DescribeOutput(NamedTuple):
@@ -747,6 +764,8 @@ class Cursor(object):
         await self._query.cancel()
 
     async def close(self):
+        if self._query is not None:
+            await self._query.aclose()
         await self.cancel()
         await self._request.close()
     

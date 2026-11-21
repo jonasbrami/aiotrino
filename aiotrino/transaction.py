@@ -78,7 +78,7 @@ class Transaction(object):
                 self._id = response.headers[constants.HEADER_STARTED_TRANSACTION]
             status = await self._request.process(response)
         self._request.transaction_id = self._id
-        logger.info("transaction started: " + self._id)
+        logger.info("transaction started: %s", self._id)
 
     async def commit(self):
         query = aiotrino.client.TrinoQuery(self._request, COMMIT)

@@ -27,7 +27,16 @@ from sqlalchemy.engine.base import Connection
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.engine.url import URL
 from sqlalchemy.sql import sqltypes
-from sqlalchemy.util.concurrency import await_fallback, await_only
+try:
+    # SQLAlchemy >= 2.1 renamed await_only() to await_()
+    from sqlalchemy.util.concurrency import await_ as await_only
+except ImportError:  # SQLAlchemy < 2.1
+    from sqlalchemy.util.concurrency import await_only
+
+try:
+    from sqlalchemy.util.concurrency import await_fallback
+except ImportError:  # removed in SQLAlchemy 2.1 together with the async_fallback mode
+    await_fallback = None
 
 from aiotrino import dbapi as aiotrino_dbapi
 from aiotrino import logging
@@ -366,7 +375,14 @@ class AsyncAdapt_aiotrino_connection(AdaptedConnection):
 class AsyncAdaptFallback_aiotrino_connection(AsyncAdapt_aiotrino_connection):
     __slots__ = ()
 
-    await_ = staticmethod(await_fallback)
+    await_ = staticmethod(await_fallback) if await_fallback is not None else staticmethod(await_only)
+
+
+def _check_async_fallback_supported() -> None:
+    if await_fallback is None or not hasattr(pool, "FallbackAsyncAdaptedQueuePool"):
+        raise exc.ArgumentError(
+            "async_fallback is not supported by this SQLAlchemy version (it was removed in SQLAlchemy 2.1)"
+        )
 
 
 class AsyncAdapt_aiotrino_dbapi:
@@ -379,6 +395,7 @@ class AsyncAdapt_aiotrino_dbapi:
         creator_fn = kw.pop("async_creator_fn", self.aiotrino.connect)
 
         if util.asbool(async_fallback):
+            _check_async_fallback_supported()
             return AsyncAdaptFallback_aiotrino_connection(
                 self,
                 creator_fn(*arg, **kw),
@@ -502,6 +519,7 @@ class AIOTrinoDialect(DefaultDialect):
         async_fallback = url.query.get("async_fallback", False)
 
         if util.asbool(async_fallback):
+            _check_async_fallback_supported()
             return pool.FallbackAsyncAdaptedQueuePool
         else:
             return pool.AsyncAdaptedQueuePool

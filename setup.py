@@ -27,7 +27,8 @@ with open(os.path.join(here, "README.md"), "r", "utf-8") as f:
     readme = f.read()
 
 sqlalchemy_require = ["sqlalchemy >= 1.4"]
-arrow_require = ["pyarrow"]
+# pyarrow >= 18 provides the arrow.uuid extension type used for UUID columns
+arrow_require = ["pyarrow >= 18"]
 
 all_require = sqlalchemy_require + arrow_require
 
@@ -49,7 +50,6 @@ tests_require = all_require + [
     "isort",
     "testcontainers",
     "boto3",
-    "pyarrow"  # needed for arrow integration tests
 ]
 
 setup(
@@ -73,8 +73,6 @@ setup(
         "Operating System :: Microsoft :: Windows",
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
@@ -82,13 +80,14 @@ setup(
         "Programming Language :: Python :: Implementation :: PyPy",
         "Topic :: Database :: Front-Ends",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.11",
     install_requires=[
         "aioitertools",
         "lz4",
+        "orjson >= 3.11.0 ; platform_python_implementation != 'PyPy'",
         "python-dateutil",
         "pytz",
-        "aiohttp",
+        "aiohttp >= 3.9",
         "tzdata",
         "tzlocal",
         "zstandard",

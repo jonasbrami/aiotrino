@@ -76,14 +76,31 @@ class TrinoDataError(NotSupportedError):
     pass
 
 
+class TrinoSegmentError(OperationalError):
+    """A spooled segment of the result could not be downloaded or decoded."""
+
+    pass
+
+
 class TrinoQueryError(Error):
     def __init__(self, error: Dict[str, Any], query_id: Optional[str] = None) -> None:
+        super().__init__(error, query_id)
         self._error = error
         self._query_id = query_id
 
     @property
     def error_code(self) -> Optional[int]:
         return self._error.get("errorCode", None)
+
+    @property
+    def vendor_code(self) -> Optional[int]:
+        """The Trino error code (``errorCode``), as ``vendor_code`` of ADBC errors."""
+        return self.error_code
+
+    @property
+    def sqlstate(self) -> Optional[str]:
+        """Trino does not report SQLSTATE codes."""
+        return None
 
     @property
     def error_name(self) -> Optional[str]:
@@ -146,7 +163,9 @@ class TrinoUserError(TrinoQueryError, ProgrammingError):
 
 
 # client module errors
-class HttpError(Exception):
+class HttpError(OperationalError):
+    """Unexpected HTTP response. A DB-API OperationalError."""
+
     pass
 
 

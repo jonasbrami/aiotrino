@@ -5,7 +5,7 @@
 # Introduction
 
 This package provides a asyncio client interface to query [Trino](https://trino.io/)
-a distributed SQL engine. It supports Python 3.9, 3.10, 3.11, 3.12, 3.13.
+a distributed SQL engine. It supports Python 3.11, 3.12 and 3.13.
 
 **Note**: This fork is designed to prototype Arrow spooling functionality in conjunction with the Trino server fork at [https://github.com/jonasbrami/trino](https://github.com/jonasbrami/trino), which implements server-side Arrow spooling support.
 
@@ -318,7 +318,7 @@ Supported OS Ubuntu 22.04
 
     ```shell
     # Install the latest of all supported versions
-    pyenv install 3.9, 3.10, 3.11, 3.12, 3.13
+    pyenv install 3.11 3.12 3.13
     ```
 
 3. Set the installed versions as default for the shell. This allows `tox` to find them.
@@ -329,7 +329,7 @@ Supported OS Ubuntu 22.04
     ```
 
     ```shell
-    pyenv shell 3.13.2 3.12.9 3.11.11 3.10.16 3.9.21
+    pyenv shell 3.13.2 3.12.9 3.11.11
     ```
 
 4. Install `tox`
